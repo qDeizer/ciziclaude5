@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.*
+*.tgz
+.DS_Store
+
+# Local reconstruction/backups; not part of the application source.
+.git-old/
+cizicode/
+kaynak/
+AGENTS.md

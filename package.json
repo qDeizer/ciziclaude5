@@ -1,0 +1,58 @@
+{
+  "name": "cizicode-desktop",
+  "productName": "Cizi Code",
+  "version": "1.0.10",
+  "description": "Connect coding tools to the Cizi Code gateway with one switch.",
+  "private": true,
+  "main": "src/main/main.js",
+  "author": "Cizi Code",
+  "copyright": "Copyright 2026 Cizi Code",
+  "scripts": {
+    "start": "electron .",
+    "cli": "node scripts/cizi-cli.cjs",
+    "test": "node test-cli-contract.cjs && node test-tools.cjs",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "confbox": "^0.2.4"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "playwright-core": "^1.60.0"
+  },
+  "build": {
+    "appId": "me.cizicode.desktop",
+    "productName": "Cizi Code",
+    "files": [
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development"
+    }
+  },
+  "allowScripts": {
+    "electron@33.2.0": true
+  }
+}

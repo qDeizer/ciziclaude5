@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src *; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
+  <title>Cizi Code</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <section id="login-view" class="view">
+    <div class="login-card">
+      <div class="brand">
+        <img class="brand-mark" src="../../assets/logo.png" alt="" />
+        <div>
+          <h1>Cizi Code</h1>
+          <p class="muted">Connect your coding tools with one switch</p>
+        </div>
+      </div>
+      <label>API Key</label>
+      <input id="login-key" data-cli-id="login-key" type="password" placeholder="sk-cizi-..." autocomplete="off" />
+      <button id="login-btn" data-cli-id="login-btn" class="primary">Sign In</button>
+      <p id="login-error" class="error hidden"></p>
+      <p class="muted tiny">Cizi Code account access</p>
+    </div>
+  </section>
+
+  <section id="dash-view" class="view hidden">
+    <header class="topbar">
+      <div class="brand small">
+        <img class="brand-mark" src="../../assets/logo.png" alt="" />
+        <span>Cizi Code</span>
+      </div>
+      <div class="topbar-right">
+        <span id="conn-status" class="status-dot">Connected</span>
+        <span id="conn-base" class="muted tiny">Cizi Code Cloud</span>
+        <button id="update-check" data-cli-id="update-check" class="ghost">Check Updates</button>
+        <button id="logout-btn" data-cli-id="logout-btn" class="ghost">Sign Out</button>
+      </div>
+    </header>
+
+    <div id="update-banner" class="update-banner hidden">
+      <span id="update-message"></span>
+      <button id="update-install" data-cli-id="update-install" class="ghost tiny-btn hidden">Restart & Install</button>
+    </div>
+
+    <main class="content">
+      <div class="grid">
+        <div class="card quota-card">
+          <div class="card-head quota-head">
+            <h3>Remaining Usage</h3>
+            <button id="usage-refresh" data-cli-id="usage-refresh" class="ghost tiny-btn" title="Refresh usage">Refresh</button>
+          </div>
+          <div class="quota-ring-wrap">
+            <svg id="quota-ring" viewBox="0 0 120 120" width="120" height="120">
+              <circle cx="60" cy="60" r="52" class="ring-bg"></circle>
+              <circle id="ring-fg" cx="60" cy="60" r="52" class="ring-fg"></circle>
+            </svg>
+            <div class="quota-percent"><span id="quota-pct">--</span><small>%</small></div>
+          </div>
+          <p id="quota-note" class="muted tiny">Your usage is shown as a percentage only.</p>
+          <p id="usage-updated" class="muted tiny">Not refreshed yet</p>
+          <p id="limit-msg" class="error hidden"></p>
+        </div>
+
+        <div class="card graph-card">
+          <div class="card-head">
+            <h3>Usage Trend</h3>
+            <select id="period-select" data-cli-id="period-select" class="select">
+              <option value="today">Today</option>
+              <option value="7d">7 Days</option>
+              <option value="30d" selected>30 Days</option>
+              <option value="60d">60 Days</option>
+            </select>
+          </div>
+          <canvas id="usage-chart" height="180"></canvas>
+          <p class="muted tiny">Trend bars are normalized. Exact usage values are not displayed.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Available Models</h3>
+        <div id="model-chips" class="chips"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Tool Configuration</h3>
+          <span class="muted tiny">Local tool connections</span>
+        </div>
+        <div id="tools-list" class="tools"></div>
+        <div id="claude-cli-install-activity" class="cli-install-activity hidden" aria-live="polite"></div>
+      </div>
+    </main>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="cliUi.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
