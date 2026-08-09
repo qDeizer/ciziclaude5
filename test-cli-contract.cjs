@@ -86,6 +86,27 @@ assert(claudeCoordinator.includes("toolManager.revertTool"), "a desktop failure 
 assert(claudeCoordinator.includes("applyTool(CLAUDE_CODE_TOOL_ID"), "the coordinator must configure the CLI through the same service the UI uses");
 assert(claudeDesktop.includes("createClaudeDesktopBackend"), "the transplanted Desktop engine must be present");
 assert(claudeLifecycle.includes("installClaudeDesktop"), "the transplanted lifecycle must provide Desktop installation");
+
+// Claude Desktop's own installer, ported from the ciziClaude4 backend. The
+// three things that made it different there have to stay different here: a
+// streamed download with a real percentage, a signature check before Windows is
+// asked to install anything, and a previewed root removal.
+const claudeDesktopInstaller = read("src/main/tools/claudeDesktopInstaller.js");
+assert(claudeDesktopInstaller.includes("verifyAnthropicSignature"), "the Desktop installer must verify the Anthropic signature");
+assert(claudeLifecycle.includes("verifyAnthropicSignatureFn("), "the install flow must run the signature check");
+assert(claudeDesktopInstaller.includes("Get-AuthenticodeSignature"), "the signature check must use Windows' own verification");
+assert(claudeDesktopInstaller.includes("ALLOWED_INSTALLER_HOSTS"), "the Desktop download must be pinned to official Anthropic hosts");
+assert(claudeDesktopInstaller.includes("Readable.fromWeb"), "the Desktop package must be streamed so progress is measured, not polled");
+assert(!claudeLifecycle.includes("curl.exe"), "the Desktop download must not shell out to curl; it cannot report progress");
+assert(main.includes("cizi:planClaudeDesktopUninstall"), "main must expose the Desktop removal preview");
+assert(main.includes("cizi:uninstallClaudeDesktop"), "main must expose Claude Desktop removal");
+assert(preload.includes("planClaudeDesktopUninstall") && preload.includes("uninstallClaudeDesktop"), "preload must expose the Desktop removal actions");
+assert(renderer.includes("claude-desktop.purge"), "renderer must expose the Claude Desktop root-removal control");
+assert(claudeDesktopInstaller.includes("preservedDirectories"), "a Desktop removal must state what it preserves");
+assert(claudeCoordinator.includes("PROCESS_RUNNING_CONFIRMATION_REQUIRED"), "a running Claude Desktop must be a question, not a dead switch");
+assert(renderer.includes("runWithRestartPrompt"), "the switch must ask before closing a running Claude Desktop");
+assert(preload.includes("connectClaude: (model, models, closeRunning)"), "preload must forward the close-confirmation answer");
+assert(renderer.includes("CLAUDE_PROGRESS_STATUS"), "Claude Desktop progress phases must map onto the activity panel's own states");
 assert(codexCli.includes("https://chatgpt.com/codex/install.ps1"), "Codex installer must use the official Windows installer URL");
 assert(codexCli.includes('percent: null, message: "Downloading the official Codex installer..."'), "Codex installer must mark an unknown download percentage as indeterminate");
 assert(renderer.includes('stepPercent > 0 || rawActive?.status === "done"'), "Codex activity must not present an unknown installer percentage as 0%");

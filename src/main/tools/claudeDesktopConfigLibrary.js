@@ -105,6 +105,54 @@ function apply(config) {
   return { configurationId: CONFIGURATION_ID, name: CONFIGURATION_NAME };
 }
 
+// Removes only what Cizi Code put in the third-party configuration list, and
+// leaves every other entry in place. This is what a restore falls back to when
+// the baseline predates this surface (older builds captured the policy and the
+// credential files but not the configuration library), and what a status read
+// uses to clear an entry that no longer has an integration behind it. Deleting
+// _meta.json wholesale is never an option: another application's entries live
+// in the same file.
+function cleanupOwned() {
+  const resolved = paths();
+  const entryRemoved = fs.existsSync(resolved.entry);
+  if (entryRemoved) fs.rmSync(resolved.entry, { force: true });
+
+  let metadataChanged = false;
+  if (fs.existsSync(resolved.metadata)) {
+    const metadata = readMetadata(resolved.metadata);
+    const entries = metadata.entries || [];
+    const remaining = entries.filter((entry) => entry?.id !== CONFIGURATION_ID);
+    const ownedApplied = metadata.appliedId === CONFIGURATION_ID;
+    if (remaining.length !== entries.length || ownedApplied) {
+      const next = { ...metadata };
+      if (metadata.entries === undefined) delete next.entries;
+      else next.entries = remaining;
+      if (ownedApplied) delete next.appliedId;
+      // A list that held nothing but Cizi's entry is removed entirely, so
+      // turning the switch off does not leave behind an empty file Claude
+      // never had. Any other key means the list is not ours to delete.
+      const emptied = remaining.length === 0
+        && Object.keys(next).every((key) => key === "entries");
+      if (emptied) fs.rmSync(resolved.metadata, { force: true });
+      else secureStore.atomicWrite(resolved.metadata, JSON.stringify(next));
+      metadataChanged = true;
+    }
+  }
+  try { fs.rmdirSync(resolved.root); } catch { /* non-empty or already absent */ }
+  return { removed: entryRemoved || metadataChanged, entryRemoved, metadataChanged };
+}
+
+// True when nothing of Cizi Code's is left in the configuration library.
+function ownedAbsent() {
+  const resolved = paths();
+  if (fs.existsSync(resolved.entry)) return false;
+  if (!fs.existsSync(resolved.metadata)) return true;
+  let metadata;
+  try { metadata = readMetadata(resolved.metadata); } catch { return false; }
+  return metadata.appliedId !== CONFIGURATION_ID
+    && !(metadata.entries || []).some((entry) => entry?.id === CONFIGURATION_ID);
+}
+
 function verify(config) {
   const resolved = paths();
   try {
@@ -127,4 +175,6 @@ module.exports = {
   matches,
   apply,
   verify,
+  cleanupOwned,
+  ownedAbsent,
 };

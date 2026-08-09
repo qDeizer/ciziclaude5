@@ -20,8 +20,18 @@ function integrationPaths(userDataPath = app.getPath("userData")) {
   });
 }
 
+// An absent record means the integration is off. A record that exists but
+// cannot be decrypted or parsed means the opposite is unknown, and answering
+// "off" there would strand a configured machine with a switch that refuses to
+// undo anything. The baseline reader has always made that distinction; this one
+// now makes it too.
 function readState() {
-  try { return secureStore.readSecureJson(integrationPaths().state); } catch { return null; }
+  const filePath = integrationPaths().state;
+  if (!fs.existsSync(filePath)) return null;
+  try { return secureStore.readSecureJson(filePath); }
+  catch (cause) {
+    throw codedError("CLAUDE_STATE_UNREADABLE", "Claude Desktop's integration record could not be read.", cause);
+  }
 }
 function writeState(value) { secureStore.writeSecureJson(integrationPaths().state, value); }
 function readBaseline() {

@@ -123,6 +123,29 @@ function createClaudeDesktopBackend(overrides = {}) {
     }
   }
 
+  // The integration record can exist and still be unreadable (a corrupt file, or
+  // secure storage that can no longer decrypt what an earlier session wrote).
+  // That is not the same as "off": the machine may well still be configured, so
+  // every caller has to decide deliberately what to do about it.
+  function readStateRecord() {
+    try { return { state: adapters.state.read(), unreadable: false }; }
+    catch (error) {
+      if (error?.code !== "CLAUDE_STATE_UNREADABLE") throw error;
+      return { state: null, unreadable: true };
+    }
+  }
+
+  // Only turning the switch off may act on an unreadable record, because a
+  // restore puts the captured original back. Configuring on top of one would
+  // capture the already-configured machine as if it were the user's original.
+  function refuseUnreadableState(unreadable) {
+    if (!unreadable) return;
+    throw codedError(
+      "CLAUDE_STATE_UNREADABLE",
+      "Claude Desktop's integration record is unreadable. Turn the switch off to restore the saved original settings.",
+    );
+  }
+
   async function requireMainRuntime() {
     const runtime = await adapters.runtime.getStatus();
     if (runtime.detectionError) throw codedError("CLAUDE_DESKTOP_DETECTION_FAILED", "Cizi Code could not verify Claude Desktop.");
@@ -200,7 +223,8 @@ function createClaudeDesktopBackend(overrides = {}) {
     if (!sessionMode && reconcileTaskBefore.exists && !reconcileTaskBefore.current) {
       throw codedError("CLAUDE_RECONCILE_TASK_CONFLICT", "A different scheduled task is using Cizi Code's Claude update-monitor name.");
     }
-    const previousState = adapters.state.read();
+    const { state: previousState, unreadable } = readStateRecord();
+    refuseUnreadableState(unreadable);
     const wasActive = previousState?.active === true;
     if (!wasActive) await adapters.policy.cleanupOwnedOrphans(values.base);
     if (adapters.features.configurationSurface === CONFIG_LIBRARY_SURFACE) {
@@ -216,9 +240,17 @@ function createClaudeDesktopBackend(overrides = {}) {
     let baseline = adapters.state.readBaseline();
     if (wasActive && !baseline) throw codedError("REPAIR_REQUIRED", "Claude Desktop's original settings backup is missing; repair is required.");
     if (!wasActive) {
-      // A completed OFF operation does not reuse an older baseline. Snapshot
-      // the configuration that exists at the moment this new ON begins.
-      if (baseline) adapters.state.remove();
+      // A completed OFF removes the baseline along with the state, so a baseline
+      // that is still here means the previous OFF never finished. Capturing a
+      // new one would record the already-configured machine as the user's
+      // original settings and lose them for good; the switch has to be turned
+      // off first, which now restores from the baseline that is still stored.
+      if (baseline) {
+        throw codedError(
+          "CLAUDE_DESKTOP_DISCONNECT_PENDING",
+          "Claude Desktop still has saved original settings from an unfinished disconnect. Turn the switch off once to restore them, then connect again.",
+        );
+      }
       baseline = { ...(await surface.capture()), takenAt: adapters.now() };
       adapters.state.writeBaseline(baseline);
     }
@@ -327,9 +359,14 @@ function createClaudeDesktopBackend(overrides = {}) {
   }
 
   async function revertUnlocked() {
-    const state = adapters.state.read();
+    const { state, unreadable } = readStateRecord();
     const baseline = adapters.state.readBaseline();
-    if (!state?.active) {
+    // The baseline is what says there is something to put back. A state record
+    // that is missing, inactive or unreadable is not proof the machine is clean:
+    // the record can be lost while the configuration it describes is still
+    // applied, and refusing to restore there is what leaves a switch that reads
+    // "off" over a still-configured Claude Desktop.
+    if (!state?.active && !baseline) {
       await adapters.reconcileTask.remove();
       adapters.legacy.cleanupLegacy({ baseline });
       return { ok: true, applied: false, restored: false, alreadyOff: true };
@@ -346,7 +383,7 @@ function createClaudeDesktopBackend(overrides = {}) {
       const taskRemoval = await adapters.reconcileTask.remove();
       reconcileTaskRemoved = !!taskRemoval?.removed;
       await surface.restoreAndVerify(baseline);
-      if (state.overlay) {
+      if (state?.overlay) {
         const removal = await adapters.overlay.removeForState(state);
         overlayRemoved = !!removal?.removed;
       }
@@ -362,13 +399,15 @@ function createClaudeDesktopBackend(overrides = {}) {
       let rollbackError = null;
       try {
         await surface.restore(rollbackSurface);
-        if (overlayRemoved && main && state.translationStatus === "active") await adapters.overlay.ensureForMain(main);
-        if (reconcileTaskRemoved && !state.sessionMode) await adapters.reconcileTask.ensure();
+        if (overlayRemoved && main && state?.translationStatus === "active") await adapters.overlay.ensureForMain(main);
+        if (reconcileTaskRemoved && !state?.sessionMode) await adapters.reconcileTask.ensure();
       } catch (failure) { rollbackError = failure; }
+      // A record that could not be read must not be rebuilt from guesses; the
+      // baseline is still on disk, so a later attempt can restore from it.
       adapters.state.write({
-        ...state,
+        ...(state || { schemaVersion: STATE_SCHEMA_VERSION, backend: "original-package" }),
         active: true,
-        phase: rollbackError ? "repair-required" : "degraded",
+        phase: rollbackError || unreadable ? "repair-required" : "degraded",
         lastErrorCode: String(error.code || "CLAUDE_DESKTOP_REVERT_FAILED"),
         ...(rollbackError ? { rollbackErrorCode: String(rollbackError.code || "ROLLBACK_FAILED") } : {}),
       });
@@ -388,10 +427,25 @@ function createClaudeDesktopBackend(overrides = {}) {
 
   async function getStatus(expectedBase) {
     const runtime = await adapters.runtime.getStatus();
-    const state = adapters.state.read();
-    if (!state?.active && !operation) await adapters.policy.cleanupOwnedOrphans(expectedBase);
+    const { state, unreadable } = readStateRecord();
+    const hasBaseline = adapters.state.hasBaseline();
+    // Orphans are only cleared when nothing is applied and nothing is left to
+    // restore. Both surfaces are swept, so an entry Cizi Code owns can never
+    // outlive its integration on one of them while the other is kept tidy.
+    if (!state?.active && !unreadable && !hasBaseline && !operation) {
+      await adapters.policy.cleanupOwnedOrphans(expectedBase);
+      if (adapters.features.configurationSurface === CONFIG_LIBRARY_SURFACE
+          && typeof adapters.configLibrary.cleanupOwned === "function") {
+        adapters.configLibrary.cleanupOwned();
+      }
+    }
     const block = await adapters.policy.machineBlock();
-    const applied = state?.active === true;
+    // A baseline on disk means the user's original settings are still parked
+    // somewhere else, so there is something the switch has to be able to put
+    // back - whatever the state record does or does not say. A completed OFF
+    // deletes the baseline with the state, so this can never read "on" over a
+    // machine that is genuinely clean.
+    const applied = state?.active === true || hasBaseline;
     const configured = applied && await policyConfigured(state);
     let automaticUpdateReconcile = !applied || state?.sessionMode === true;
     let reconcileTaskStatusError = null;
@@ -399,14 +453,14 @@ function createClaudeDesktopBackend(overrides = {}) {
       try { automaticUpdateReconcile = await adapters.reconcileTask.isCurrent(); }
       catch (error) { reconcileTaskStatusError = error; automaticUpdateReconcile = false; }
     }
-    let translationStatus = applied ? (state.translationStatus || "pending") : "inactive";
+    let translationStatus = applied ? (state?.translationStatus || "pending") : "inactive";
     let overlayInstalled = false;
     let overlayStatusError = null;
     if (state?.brandingMode === "version-matched-overlay" || !applied) {
       try {
         const currentOverlay = await adapters.overlay.queryInstalledOverlay();
         overlayInstalled = !!currentOverlay;
-        if (applied && state.translationStatus === "active") {
+        if (applied && state?.translationStatus === "active") {
           const matches = currentOverlay
             && currentOverlay.packageFullName === state.overlay?.packageFullName
             && currentOverlay.publisher === state.overlay?.publisher
@@ -418,7 +472,7 @@ function createClaudeDesktopBackend(overrides = {}) {
         if (applied) translationStatus = "error";
       }
     }
-    const packageChanged = !!(applied && runtime.installed && state.mainPackage
+    const packageChanged = !!(applied && runtime.installed && state?.mainPackage
       && (state.mainPackage.packageFullName !== runtime.PackageFullName
         || state.mainPackage.version !== runtime.Version));
     const needsRefresh = !!(applied && runtime.installed
@@ -426,6 +480,8 @@ function createClaudeDesktopBackend(overrides = {}) {
         || (!state?.sessionMode && !automaticUpdateReconcile)
         || packageChanged
         || translationStatus === "error"
+        || unreadable
+        || !state
         || state.phase === "degraded"));
     const detectionState = runtime.detectionError ? "unknown" : "known";
     const processState = runtime.processScanOk === false ? "unknown" : "known";
@@ -447,16 +503,17 @@ function createClaudeDesktopBackend(overrides = {}) {
       backend: "original-package",
       appUserModelId: packageIdentity.CLAUDE_MAIN_APP_ID,
       translationStatus,
-      translationMessage: applied ? (state.translationMessage || (translationStatus === "error" ? "The Turkish interface package needs repair." : null)) : null,
+      translationMessage: applied ? (state?.translationMessage || (translationStatus === "error" ? "The Turkish interface package needs repair." : null)) : null,
       brandingStatus: applied
-        && ["version-matched-overlay", "runtime-devtools"].includes(state.brandingMode)
+        && ["version-matched-overlay", "runtime-devtools"].includes(state?.brandingMode)
         ? "active" : "inactive",
       overlayInstalled,
-      phase: state?.phase || (applied ? "on" : "off"),
+      phase: unreadable || (applied && !state) ? "repair-required" : (state?.phase || (applied ? "on" : "off")),
       detectionState,
       processState,
       errorCode: detectionState === "unknown" ? "CLAUDE_DESKTOP_DETECTION_FAILED"
         : processState === "unknown" ? "PROCESS_SCAN_FAILED"
+          : unreadable ? "CLAUDE_STATE_UNREADABLE"
           : reconcileTaskStatusError ? String(reconcileTaskStatusError.code || "CLAUDE_RECONCILE_TASK_STATUS_FAILED")
           : overlayStatusError ? "CLAUDE_OVERLAY_STATUS_FAILED" : null,
       blocked,
@@ -468,7 +525,8 @@ function createClaudeDesktopBackend(overrides = {}) {
   }
 
   async function reconcileUnlocked(onProgress = () => {}) {
-    const state = adapters.state.read();
+    const { state, unreadable } = readStateRecord();
+    refuseUnreadableState(unreadable);
     const baseline = adapters.state.readBaseline();
     if (!state?.active) {
       await adapters.policy.cleanupOwnedOrphans(state?.baseUrl);
@@ -546,11 +604,14 @@ function createClaudeDesktopBackend(overrides = {}) {
   }
 
   async function launchUnlocked(onProgress = () => {}) {
-    const state = adapters.state.read();
+    const { state, unreadable } = readStateRecord();
+    // Launching an unreadable integration would start Claude against settings
+    // nothing can describe any more; the switch has to be cycled first.
+    refuseUnreadableState(unreadable);
     const runtime = await adapters.runtime.getStatus();
     if (!runtime.installed) throw codedError("INSTALL_REQUIRED", "Claude Desktop is not installed.");
     if (state?.active && !runtime.running) await reconcileUnlocked(onProgress);
-    const latest = adapters.state.read() || state;
+    const latest = readStateRecord().state || state;
     if (latest?.active && latest.brandingMode === "runtime-devtools") {
       await adapters.runtime.launchCiziRuntime(packageIdentity.CLAUDE_MAIN_APP_ID);
     } else if (latest?.active) await adapters.runtime.launchChat(packageIdentity.CLAUDE_MAIN_APP_ID);

@@ -7,16 +7,17 @@ const path = require("path");
 const { windowsPowerShellEnvironment } = require("../windowsPowerShell");
 const {
   CLAUDE_DESKTOP_MSIX_URL,
-  CLAUDE_DESKTOP_DOWNLOAD_TIMEOUT_MS,
   installerFailure,
   installerStageFailure,
-  curlOrIwrDownloadScript,
-  claudeDesktopDownloadScript,
   claudeCodeWingetPrerequisiteScript,
   claudeCodeWingetInstallScript,
   cliWingetPrerequisiteFailure,
   claudeDesktopInstallScript,
+  claudeDesktopInstallFailure,
 } = require("./claudeInstallerContract");
+// Claude Desktop's own download/verify/remove layer, ported from ciziClaude4.
+const installer = require("./claudeDesktopInstaller");
+const { assertArtifactResponse } = installer;
 
 const execFileAsync = promisify(execFile);
 const WINDOWS_POWERSHELL = path.join(
@@ -73,64 +74,10 @@ function formatByteCount(bytes) {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
 }
 
-function contentLengthProbeScript(url) {
-  // Both callers below pass module constants for Anthropic's official URLs.
-  // HEAD is cheap when supported; a one-byte range request is a safe fallback
-  // for CDN redirects that omit Content-Length on HEAD responses.
-  return [
-    "$ErrorActionPreference='Stop'",
-    "$ProgressPreference='SilentlyContinue'",
-    `$url='${url}'`,
-    "$length=[int64]0",
-    "$response=$null",
-    "try{",
-    "$request=[System.Net.HttpWebRequest]::Create($url)",
-    "$request.Method='HEAD'",
-    "$request.AllowAutoRedirect=$true",
-    "$request.MaximumAutomaticRedirections=10",
-    "$request.Timeout=30000",
-    "$request.ReadWriteTimeout=30000",
-    "$response=$request.GetResponse()",
-    "$length=[int64]$response.ContentLength",
-    "}catch{",
-    "if($null -ne $response){$response.Close();$response=$null}",
-    "try{",
-    "$request=[System.Net.HttpWebRequest]::Create($url)",
-    "$request.Method='GET'",
-    "$request.AllowAutoRedirect=$true",
-    "$request.MaximumAutomaticRedirections=10",
-    "$request.Timeout=30000",
-    "$request.ReadWriteTimeout=30000",
-    "$request.AddRange(0,0)",
-    "$response=$request.GetResponse()",
-    "$range=[string]$response.Headers['Content-Range']",
-    "if($range -match '/(\\d+)$'){$length=[int64]$Matches[1]}elseif($response.ContentLength -gt 0){$length=[int64]$response.ContentLength}",
-    "}catch{$length=[int64]0}",
-    "}finally{if($null -ne $response){$response.Close()}}",
-    "if($length -gt 0){[Console]::Out.Write([string]$length)}",
-  ].join("\n");
-}
-
-function parseContentLength(value) {
-  const text = String(value || "").trim();
-  if (!/^\d+$/.test(text)) return null;
-  const bytes = Number(text);
-  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : null;
-}
-
-async function probeDownloadSize(url, { runPowerShellFn = runPowerShell } = {}) {
-  try {
-    const output = await runPowerShellFn(contentLengthProbeScript(url), {
-      timeout: 45000,
-      maxBuffer: 1024,
-    });
-    return parseContentLength(output);
-  } catch {
-    // A missing Content-Length must never block an official installation. The
-    // downloader still shows its final completion state in that case.
-    return null;
-  }
-}
+// The Claude Desktop package size is resolved by claudeDesktopInstaller's own
+// range request, which also gives the streaming downloader its total. The
+// PowerShell HEAD/range probe that used to live here is gone with the curl
+// downloader it fed.
 
 function createDownloadProgressReporter(onProgress, label, totalBytes) {
   const report = typeof onProgress === "function" ? onProgress : () => {};
@@ -166,102 +113,13 @@ function createDownloadProgressReporter(onProgress, label, totalBytes) {
     lastAt = now;
 
     const message = percent === null
-      ? (downloaded > 0 ? `${label} (${formatByteCount(downloaded)} downloaded)` : `${label}...`)
-      : `${label} ${percent}%${total ? ` (${formatByteCount(downloaded)} of ${formatByteCount(total)})` : ""}`;
+      ? (downloaded > 0 ? `${label} (${formatByteCount(downloaded)} indirildi)` : `${label}...`)
+      : `${label} %${percent}${total ? ` (${formatByteCount(downloaded)} / ${formatByteCount(total)})` : ""}`;
     const details = { downloadedBytes: downloaded };
     if (percent !== null) details.percent = percent;
     if (total) details.totalBytes = total;
     report("downloading", message, details);
   };
-}
-
-function runPowerShellWithFileProgress(script, options = {}, {
-  targetPath,
-  onFileSize = () => {},
-  pollIntervalMs = 350,
-} = {}) {
-  const { env = {}, timeout = 120000 } = options;
-  const interval = Math.min(1000, Math.max(150, Number(pollIntervalMs) || 350));
-
-  return new Promise((resolve, reject) => {
-    let child;
-    let settled = false;
-    let polling = false;
-    let timedOut = false;
-    let pollTimer = null;
-    let timeoutTimer = null;
-
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      if (pollTimer) clearInterval(pollTimer);
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (error) reject(error);
-      else resolve(value);
-    };
-
-    const inspectFile = async () => {
-      if (settled || polling) return;
-      polling = true;
-      try {
-        const bytes = await fileSize(targetPath);
-        try {
-          onFileSize(bytes);
-        } catch {
-          // A progress listener must never interrupt the installation itself.
-        }
-      } finally {
-        polling = false;
-      }
-    };
-
-    try {
-      child = spawn(WINDOWS_POWERSHELL, powerShellArguments(script), {
-        windowsHide: true,
-        env: windowsPowerShellEnvironment(process.env, env),
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (error) {
-      finish(error);
-      return;
-    }
-
-    // Consume the streams so a downloader error cannot fill a pipe. The
-    // validation script gives a concise, non-secret error to the caller.
-    child.stdout?.on("data", () => {});
-    child.stderr?.on("data", () => {});
-    child.on("error", (error) => finish(error));
-    child.on("close", async (code) => {
-      await inspectFile();
-      if (timedOut) {
-        finish(installerFailure(
-          "CLAUDE_DOWNLOAD_TIMEOUT",
-          "The Claude download timed out.",
-          { stage: "downloading", processExitCode: Number.isInteger(code) ? code : null },
-        ));
-      } else if (code === 0) {
-        finish(null, "");
-      } else {
-        finish(installerFailure(
-          "CLAUDE_DOWNLOAD_COMMAND_FAILED",
-          "The Claude download command stopped before it finished.",
-          { stage: "downloading", processExitCode: Number.isInteger(code) ? code : null },
-        ));
-      }
-    });
-
-    pollTimer = setInterval(() => { void inspectFile(); }, interval);
-    void inspectFile();
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      try {
-        child.kill();
-      } catch {
-        // The close handler will settle the operation if the process has
-        // already exited between the timeout and this call.
-      }
-    }, Math.max(1, Number(timeout) || 120000));
-  });
 }
 
 // WinGet does not expose a stable machine-readable percentage while installing
@@ -273,6 +131,10 @@ function runPowerShellWithHeartbeat(script, options = {}, {
   heartbeatPath,
   onHeartbeat = () => {},
   pollIntervalMs = 500,
+  timeoutCode = "CLAUDE_CODE_INSTALL_TIMEOUT",
+  timeoutMessage = "Claude Code installation timed out. Check your npm/network setup and try again.",
+  failureCode = "CLAUDE_CODE_INSTALL_COMMAND_FAILED",
+  failureMessage = "Claude Code installation stopped before it finished. Check npm and try again.",
 } = {}) {
   const { env = {}, timeout = 20 * 60 * 1000 } = options;
   const interval = Math.min(1000, Math.max(150, Number(pollIntervalMs) || 500));
@@ -322,16 +184,16 @@ function runPowerShellWithHeartbeat(script, options = {}, {
       await inspectHeartbeat();
       if (timedOut) {
         finish(installerFailure(
-          "CLAUDE_CODE_INSTALL_TIMEOUT",
-          "Claude Code installation timed out. Check your npm/network setup and try again.",
+          timeoutCode,
+          timeoutMessage,
           { stage: "installing", processExitCode: Number.isInteger(code) ? code : null },
         ));
       } else if (code === 0) {
         finish(null, "");
       } else {
         finish(installerFailure(
-          "CLAUDE_CODE_INSTALL_COMMAND_FAILED",
-          "Claude Code installation stopped before it finished. Check npm and try again.",
+          failureCode,
+          failureMessage,
           { stage: "installing", processExitCode: Number.isInteger(code) ? code : null },
         ));
       }
@@ -343,65 +205,6 @@ function runPowerShellWithHeartbeat(script, options = {}, {
       try { child.kill(); } catch { /* close handler settles a raced process. */ }
     }, Math.max(1, Number(timeout) || 20 * 60 * 1000));
   });
-}
-
-async function downloadOfficialFile({
-  url,
-  script,
-  targetPath,
-  env,
-  timeout,
-  maxBuffer,
-  label,
-  onProgress,
-}, {
-  runPowerShellFn = runPowerShell,
-  probeDownloadSizeFn = probeDownloadSize,
-  runPowerShellWithFileProgressFn = null,
-} = {}) {
-  let totalBytes = null;
-  // Unit tests inject a size probe. In production, the regular PowerShell
-  // runner selects the safe HEAD/range preflight automatically.
-  if (runPowerShellFn === runPowerShell || probeDownloadSizeFn !== probeDownloadSize) {
-    totalBytes = await probeDownloadSizeFn(url);
-  }
-
-  const reportFileSize = createDownloadProgressReporter(onProgress, label, totalBytes);
-  reportFileSize(0, { force: true });
-  const commandOptions = { env, timeout, maxBuffer };
-  const progressRunner = runPowerShellWithFileProgressFn ||
-    (runPowerShellFn === runPowerShell ? runPowerShellWithFileProgress : null);
-
-  try {
-    if (progressRunner) {
-      await progressRunner(script, commandOptions, {
-        targetPath,
-        onFileSize: reportFileSize,
-      });
-    } else {
-      await runPowerShellFn(script, commandOptions);
-    }
-  } catch (error) {
-    const downloadedBytes = await fileSize(targetPath);
-    const priorDiagnostic = error?.ciziDiagnostic && typeof error.ciziDiagnostic === "object"
-      ? error.ciziDiagnostic
-      : {};
-    const timedOut = error?.code === "CLAUDE_DOWNLOAD_TIMEOUT";
-    throw installerFailure(
-      timedOut ? "CLAUDE_DOWNLOAD_TIMEOUT" : "CLAUDE_DOWNLOAD_FAILED",
-      timedOut
-        ? `${label} timed out. Keep Cizi Code open and try again on a stable connection.`
-        : `${label} could not finish. Check your internet connection and free disk space, then try again.`,
-      {
-        stage: "downloading",
-        downloadedBytes,
-        ...(Number.isSafeInteger(totalBytes) ? { totalBytes } : {}),
-        ...(Number.isInteger(priorDiagnostic.processExitCode) ? { processExitCode: priorDiagnostic.processExitCode } : {}),
-      },
-    );
-  }
-
-  reportFileSize(await fileSize(targetPath), { completed: true, force: true });
 }
 
 function normalizedPath(filePath) {
@@ -935,86 +738,188 @@ async function installClaudeCli(onProgress = () => {}, {
   return status;
 }
 
+// The official package is a quarter of a gigabyte, and the download is by far
+// the slowest part of the installation. It lands on a stable path so a failed
+// or declined install can be retried immediately instead of pulling the same
+// bytes down again. The cached copy is only trusted when it is byte-for-byte
+// the size the server currently reports for "latest" and still starts with a
+// zip header, so a stale or truncated file is always replaced.
+function claudeDesktopPackagePath() {
+  return path.join(os.tmpdir(), "cizi-claude-desktop-latest.msix");
+}
+
+async function hasZipHeader(filePath) {
+  let handle = null;
+  try {
+    handle = await fs.promises.open(filePath, "r");
+    const header = Buffer.alloc(2);
+    const { bytesRead } = await handle.read(header, 0, 2, 0);
+    return bytesRead === 2 && header[0] === 0x50 && header[1] === 0x4b;
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function reusableClaudeDesktopPackage(targetPath, expectedBytes) {
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0) return false;
+  if (await fileSize(targetPath) !== expectedBytes) return false;
+  return hasZipHeader(targetPath);
+}
+
+async function readInstallResult(resultPath) {
+  try {
+    const raw = await fs.promises.readFile(resultPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    // The elevated installer never started, or could not write its report. The
+    // process exit code still tells the caller what to say.
+    return null;
+  }
+}
+
 async function installClaudeDesktop(onProgress = () => {}, {
   detectClaudeDesktopFn = detectClaudeDesktop,
   runPowerShellFn = runPowerShell,
   cleanupTemporaryInstallerFn = cleanupTemporaryInstaller,
-  probeDownloadSizeFn = probeDownloadSize,
-  runPowerShellWithFileProgressFn = null,
+  inspectDownloadFn = installer.inspectDownload,
+  downloadInstallerFn = installer.downloadInstaller,
+  verifyAnthropicSignatureFn = installer.verifyAnthropicSignature,
+  runPowerShellWithHeartbeatFn = null,
+  delayFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  packagePathFn = claudeDesktopPackagePath,
 } = {}) {
   const existing = await detectClaudeDesktopFn();
   if (existing.installed) {
-    onProgress("verifying", "Claude Desktop is already installed.");
+    onProgress("verifying", "Claude Desktop zaten kurulu.");
     return existing;
   }
-  const tempFile = path.join(os.tmpdir(), `Claude-${Date.now()}.msix`);
-  const resultFile = `${tempFile}.result.json`;
+  const packageFile = packagePathFn();
+  const resultFile = `${packageFile}.result.json`;
+  const heartbeatFile = `${packageFile}.heartbeat`;
+  const heartbeatRunner = runPowerShellWithHeartbeatFn
+    || (runPowerShellFn === runPowerShell ? runPowerShellWithHeartbeat : null);
+  let installed = false;
   try {
-    await downloadOfficialFile({
-      url: CLAUDE_DESKTOP_MSIX_URL,
-      script: claudeDesktopDownloadScript(),
-      targetPath: tempFile,
-      env: { CIZI_CLAUDE_MSIX: tempFile },
-      timeout: CLAUDE_DESKTOP_DOWNLOAD_TIMEOUT_MS,
-      maxBuffer: 16 * 1024 * 1024,
-      label: "Downloading the official Claude Desktop MSIX",
-      onProgress,
-    }, {
-      runPowerShellFn,
-      probeDownloadSizeFn,
-      runPowerShellWithFileProgressFn,
+    // The exact published size is resolved before a single byte is fetched, so
+    // the very first progress event already carries a real percentage instead
+    // of an indeterminate spinner.
+    onProgress("downloading", "Resmî Claude Desktop paketi hazırlanıyor...", {
+      percent: 0, downloadedBytes: 0, totalBytes: null,
     });
-    const developmentInstall = process.defaultApp === true;
-    onProgress(
-      "installing",
-      developmentInstall
-        ? "Installing the official Claude Desktop package for this user..."
-        : "Windows will ask for administrator approval to install Claude Desktop...",
-    );
-    try {
-      await runPowerShellFn(claudeDesktopInstallScript(tempFile, resultFile, { elevated: !developmentInstall }), {
-        env: {
-          CIZI_CLAUDE_MSIX: tempFile,
-          CIZI_CLAUDE_APPX_RESULT: resultFile,
-        },
-        timeout: 5 * 60 * 1000,
-        maxBuffer: 16 * 1024 * 1024,
+    const probed = await inspectDownloadFn(CLAUDE_DESKTOP_MSIX_URL);
+    const publishedBytes = Number.isSafeInteger(probed?.contentLength) && probed.contentLength > 0
+      ? probed.contentLength
+      : null;
+    if (await reusableClaudeDesktopPackage(packageFile, publishedBytes)) {
+      onProgress("downloading", `Paket zaten indirilmiş (${formatByteCount(publishedBytes)}).`, {
+        percent: 100,
+        downloadedBytes: publishedBytes,
+        totalBytes: publishedBytes,
       });
+    } else {
+      const report = createDownloadProgressReporter(onProgress, "Claude Desktop paketi indiriliyor", publishedBytes);
+      report(0, { force: true });
+      await downloadInstallerFn(CLAUDE_DESKTOP_MSIX_URL, packageFile, {
+        knownTotalBytes: publishedBytes,
+        validateResponse: (details) => assertArtifactResponse("msix", details),
+        onProgress: ({ received }) => report(received),
+      });
+      report(await fileSize(packageFile), { completed: true, force: true });
+    }
+
+    // The artifact is executable code fetched over the network, so its
+    // Authenticode signature is checked against Anthropic's publisher identity
+    // before Windows is ever asked to register it.
+    onProgress("verifying-signature", "Anthropic dijital imzası doğrulanıyor...");
+    try {
+      await verifyAnthropicSignatureFn(packageFile, { runPowerShellFn });
     } catch (error) {
-      const cancelled = /cancel/i.test(String(error?.message || ""));
+      // A file that fails the signature check is never kept for a retry.
+      await cleanupTemporaryInstallerFn(packageFile);
+      throw error;
+    }
+
+    // Elevation is a property of the package, not of how Cizi Code was started:
+    // the MSIX registers a localSystem service, which Windows refuses to install
+    // per-user with 0x80073D28.
+    onProgress("installing", "Windows yönetici onayı isteyecek...");
+    const options = {
+      env: {
+        CIZI_CLAUDE_MSIX: packageFile,
+        CIZI_CLAUDE_APPX_RESULT: resultFile,
+        CIZI_CLAUDE_APPX_HEARTBEAT: heartbeatFile,
+      },
+      timeout: 30 * 60 * 1000,
+      maxBuffer: 16 * 1024 * 1024,
+    };
+    const script = claudeDesktopInstallScript(packageFile, resultFile);
+    try {
+      if (heartbeatRunner) {
+        let ticks = 0;
+        await heartbeatRunner(script, options, {
+          heartbeatPath: heartbeatFile,
+          // The first tick is written before the prompt appears, so the message
+          // stays truthful about what the user is being waited on.
+          onHeartbeat: () => {
+            ticks += 1;
+            onProgress("installing", ticks <= 1
+              ? "Windows yönetici onayı isteyecek..."
+              : "Windows paketi kaydediyor (birkaç dakika sürebilir)...");
+          },
+          timeoutCode: "CLAUDE_DESKTOP_INSTALL_TIMEOUT",
+          timeoutMessage: "The Claude Desktop installation timed out. Approve the Windows prompt promptly, then try again.",
+          failureCode: "CLAUDE_DESKTOP_INSTALL_FAILED",
+          failureMessage: "Windows could not install the official Claude Desktop package. Try again.",
+        });
+      } else {
+        await runPowerShellFn(script, options);
+      }
+    } catch (error) {
+      // The heartbeat runner reports the exit code as a diagnostic; a plain
+      // execFile rejection carries it on the error itself.
+      const reported = Number.isInteger(error?.ciziDiagnostic?.processExitCode)
+        ? error.ciziDiagnostic.processExitCode
+        : Number(error?.code);
+      throw claudeDesktopInstallFailure({
+        exitCode: Number.isInteger(reported) ? reported : null,
+        result: await readInstallResult(resultFile),
+        cause: error,
+      });
+    }
+    installed = true;
+  } finally {
+    await cleanupTemporaryInstallerFn(resultFile);
+    await cleanupTemporaryInstallerFn(heartbeatFile);
+    // A failed install keeps the package so the retry is instant; a successful
+    // one has no further use for a quarter of a gigabyte of temporary files.
+    if (installed) await cleanupTemporaryInstallerFn(packageFile);
+  }
+  onProgress("verifying", "Kurulum doğrulanıyor...");
+  let status;
+  // Windows finishes registering the package a moment after the deployment
+  // command returns, so a single miss is not yet a failed installation.
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      status = await detectClaudeDesktopFn();
+    } catch (error) {
       throw installerStageFailure(
-        cancelled ? "CLAUDE_DESKTOP_INSTALL_CANCELLED" : "CLAUDE_DESKTOP_INSTALL_FAILED",
-        cancelled
-          ? "Administrator approval was cancelled. Claude Desktop was not installed."
-          : "Claude Desktop could not be installed. Approve the Windows prompt, then try again.",
-        "installing",
+        "CLAUDE_DESKTOP_VERIFY_FAILED",
+        "Claude Desktop installation finished but could not be verified. Restart Cizi Code and try again.",
+        "verifying",
         error,
       );
     }
-  } finally {
-    await cleanupTemporaryInstallerFn(tempFile);
-    await cleanupTemporaryInstallerFn(resultFile);
+    if (status.installed) return status;
+    await delayFn(1000);
   }
-  onProgress("verifying", "Verifying Claude Desktop installation...");
-  let status;
-  try {
-    status = await detectClaudeDesktopFn();
-  } catch (error) {
-    throw installerStageFailure(
-      "CLAUDE_DESKTOP_VERIFY_FAILED",
-      "Claude Desktop installation finished but could not be verified. Restart Cizi Code and try again.",
-      "verifying",
-      error,
-    );
-  }
-  if (!status.installed) {
-    throw installerFailure(
-      "CLAUDE_DESKTOP_NOT_DETECTED",
-      "Claude Desktop installation finished but the package was not detected. Restart Cizi Code and try again.",
-      { stage: "verifying" },
-    );
-  }
-  return status;
+  throw installerFailure(
+    "CLAUDE_DESKTOP_NOT_DETECTED",
+    "Claude Desktop installation finished but the package was not detected. Restart Cizi Code and try again.",
+    { stage: "verifying" },
+  );
 }
 
 async function installTool(toolId, onProgress) {
@@ -1022,6 +927,88 @@ async function installTool(toolId, onProgress) {
   if (toolId === "claude-code") return installClaudeCli(report);
   if (toolId === "claude-desktop") return installClaudeDesktop(report);
   throw new Error(`Installation is not supported for ${toolId}.`);
+}
+
+// What a Claude Desktop removal would touch, resolved from what is actually on
+// the machine. Shown to the user before anything is deleted, the same way the
+// Codex products preview their own removal.
+async function planClaudeDesktopUninstall({ detectClaudeDesktopFn = detectClaudeDesktop } = {}) {
+  const status = await detectClaudeDesktopFn();
+  return {
+    ...installer.planRemoval({
+      installed: status.installed,
+      version: status.Version,
+      installKind: status.InstallKind,
+    }),
+    desktop: status,
+  };
+}
+
+// Removes Claude Desktop itself and the leftovers listed in the plan. Cizi
+// Code's own integration is expected to be off first: the caller restores the
+// user's original settings before the application that owns them disappears.
+async function uninstallClaudeDesktop(onProgress = () => {}, {
+  detectClaudeDesktopFn = detectClaudeDesktop,
+  runPowerShellFn = runPowerShell,
+  stopToolFn = stopTool,
+  removeLeftovers = true,
+} = {}) {
+  const before = await detectClaudeDesktopFn();
+  if (!before.installed) {
+    onProgress("uninstalling", "Claude Desktop zaten kurulu değil; kalıntılar temizleniyor...");
+  } else {
+    onProgress("uninstalling", "Claude Desktop kapatılıyor...");
+    try { await stopToolFn("claude-desktop"); }
+    catch (error) {
+      throw installerFailure(
+        "CLAUDE_DESKTOP_UNINSTALL_PROCESS_RUNNING",
+        "Claude Desktop kapatılamadı. Uygulamayı elle kapatıp tekrar deneyin.",
+        { stage: "uninstalling" },
+      );
+    }
+    onProgress("uninstalling", "Claude Desktop kaldırılıyor...");
+    try {
+      if (before.InstallKind === "squirrel") {
+        const parsed = installer.parseTrustedUninstallCommand(
+          before.UninstallString || `"${path.join(before.InstallRoot || "", "Update.exe")}" --uninstall`,
+        );
+        await execFileAsync(parsed.file, parsed.args, { windowsHide: true, timeout: 180000 });
+      } else {
+        await runPowerShellFn(installer.removeMsixScript(), {
+          env: { CIZI_CLAUDE_PACKAGE: before.PackageFullName },
+          timeout: 180000,
+        });
+      }
+    } catch (error) {
+      if (error?.ciziPublicMessage) throw error;
+      throw installerFailure(
+        "CLAUDE_DESKTOP_UNINSTALL_FAILED",
+        "Windows Claude Desktop'ı kaldıramadı. Tekrar deneyin.",
+        { stage: "uninstalling" },
+      );
+    }
+  }
+
+  let leftoverWarning = null;
+  if (removeLeftovers) {
+    onProgress("uninstalling", "Claude Desktop kalıntıları temizleniyor...");
+    // Leftover cleanup is best-effort: the application is already gone, and a
+    // locked cache folder must not turn a finished removal into a failure.
+    try { await runPowerShellFn(installer.removeLeftoversScript(), { timeout: 180000 }); }
+    catch (error) { leftoverWarning = String(error?.message || error); }
+  }
+
+  onProgress("verifying", "Kaldırma doğrulanıyor...");
+  const after = await detectClaudeDesktopFn();
+  const remaining = installer.claudeLeftoverDirectories().filter((target) => fs.existsSync(target));
+  return {
+    ok: !after.installed,
+    removed: before.installed && !after.installed,
+    alreadyAbsent: !before.installed,
+    installed: !!after.installed,
+    remainingDirectories: remaining,
+    ...(leftoverWarning ? { leftoverWarning } : {}),
+  };
 }
 
 function launchExecutable(executable, cwd) {
@@ -1075,15 +1062,9 @@ function launchClaudeNewChat(appUserModelId) {
 module.exports = {
   CLAUDE_PACKAGE_FAMILY,
   CLAUDE_NEW_CHAT_URI,
-  CLAUDE_DESKTOP_DOWNLOAD_TIMEOUT_MS,
   runPowerShell,
-  contentLengthProbeScript,
-  parseContentLength,
-  probeDownloadSize,
   createDownloadProgressReporter,
-  runPowerShellWithFileProgress,
   runPowerShellWithHeartbeat,
-  downloadOfficialFile,
   claudeCodeWingetPrerequisiteScript,
   claudeCodeWingetInstallScript,
   wingetClaudeCodeCandidates,
@@ -1098,6 +1079,10 @@ module.exports = {
   stopTool,
   installClaudeCli,
   installClaudeDesktop,
+  claudeDesktopPackagePath,
+  reusableClaudeDesktopPackage,
+  planClaudeDesktopUninstall,
+  uninstallClaudeDesktop,
   installTool,
   launchExecutable,
   launchAppUserModelId,

@@ -57,6 +57,8 @@ function usage() {
         "cizi-cli select tool.codex.model gpt-5.6-terra",
         "cizi-cli click codex-desktop.install",
         "cizi-cli click codex-desktop.purge",
+        "cizi-cli click claude-desktop.install",
+        "cizi-cli click claude-desktop.purge",
         "cizi-cli select period-select 7d",
       ],
       guarantee: "Mutating commands resolve and trigger the renderer UI control; they do not call application services directly.",
@@ -94,6 +96,9 @@ function request(state, payload) {
     // Windows package manager, so they get the long timeout.
     const LONG_ACTIONS = [
       "claude-code-cli.install", "claude-code-cli.purge",
+      // Claude Desktop is the longest of them all: a quarter-gigabyte download
+      // followed by an elevated package registration.
+      "claude-desktop.install", "claude-desktop.purge",
       "codex-cli.install", "codex-cli.purge",
       "codex-desktop.install", "codex-desktop.purge",
     ];

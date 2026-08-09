@@ -835,7 +835,7 @@ ipcMain.handle("cizi:openCodexCliSite", wrap("openCodexCliSite", async () => {
 ipcMain.handle("cizi:getClaudeState", wrap("getClaudeState", async () => claude.getState(api.TOOL_BASE_URL)));
 ipcMain.handle("cizi:getClaudeProgress", wrap("getClaudeProgress", async () => claudeProgressState));
 
-ipcMain.handle("cizi:connectClaude", wrap("connectClaude", async ({ model, models } = {}) => {
+ipcMain.handle("cizi:connectClaude", wrap("connectClaude", async ({ model, models, closeRunning } = {}) => {
   const s = requireSession();
   if (!model) throw new Error("Önce bir model seçin.");
   const values = {
@@ -847,11 +847,15 @@ ipcMain.handle("cizi:connectClaude", wrap("connectClaude", async ({ model, model
     haiku: model,
     models: Array.isArray(models) && models.length ? models : [model],
   };
-  return claude.connect(values);
+  return claude.connect(values, { closeRunning: closeRunning === true });
 }));
 
-ipcMain.handle("cizi:disconnectClaude", wrap("disconnectClaude", async () => claude.disconnect(api.TOOL_BASE_URL)));
+ipcMain.handle("cizi:disconnectClaude", wrap("disconnectClaude", async ({ closeRunning } = {}) =>
+  claude.disconnect(api.TOOL_BASE_URL, { closeRunning: closeRunning === true })));
 ipcMain.handle("cizi:installClaudeDesktop", wrap("installClaudeDesktop", async () => claude.installDesktop()));
+ipcMain.handle("cizi:planClaudeDesktopUninstall", wrap("planClaudeDesktopUninstall", async () => claude.planDesktopUninstall()));
+ipcMain.handle("cizi:uninstallClaudeDesktop", wrap("uninstallClaudeDesktop", async ({ removeLeftovers } = {}) =>
+  claude.uninstallDesktop({ removeLeftovers: removeLeftovers !== false })));
 ipcMain.handle("cizi:launchClaudeDesktop", wrap("launchClaudeDesktop", async () => claude.launchDesktop()));
 ipcMain.handle("cizi:repairClaudeDesktop", wrap("repairClaudeDesktop", async () => claude.repairDesktop()));
 ipcMain.handle("cizi:stopClaudeDesktop", wrap("stopClaudeDesktop", async () => claude.stopDesktop()));

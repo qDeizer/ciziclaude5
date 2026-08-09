@@ -29,7 +29,14 @@ function createSurfaceManager({ policy, helper, configLibrary } = {}) {
       throw codedError("BACKUP_INVALID", "Claude Desktop's original configuration backup is incomplete.");
     }
     await policy.restore(snapshot);
-    if (configLibrary && snapshot.configLibrary) configLibrary.restore(snapshot);
+    // A baseline taken before this surface existed carries no configuration
+    // library section. Skipping it would leave Cizi Code's entry applied while
+    // the restore still reported success, so the entry is removed surgically
+    // instead - other applications' entries in the same list are untouched.
+    if (configLibrary) {
+      if (snapshot.configLibrary) configLibrary.restore(snapshot);
+      else configLibrary.cleanupOwned();
+    }
     helper.restore(snapshot);
   }
 
@@ -37,9 +44,12 @@ function createSurfaceManager({ policy, helper, configLibrary } = {}) {
     if (!snapshot?.policy || !snapshot?.ownedFiles) return false;
     const currentPolicy = await policy.capture();
     const currentFiles = helper.capture();
-    return policyModule.policySnapshotsEqual(snapshot, currentPolicy)
-      && credentialModule.ownedFilesEqual(snapshot, currentFiles)
-      && (!configLibrary || !snapshot.configLibrary || configLibrary.matches(snapshot));
+    if (!policyModule.policySnapshotsEqual(snapshot, currentPolicy)) return false;
+    if (!credentialModule.ownedFilesEqual(snapshot, currentFiles)) return false;
+    if (!configLibrary) return true;
+    // The library is always checked, so "restored exactly" can never be claimed
+    // over a configuration the baseline simply did not know about.
+    return snapshot.configLibrary ? configLibrary.matches(snapshot) : configLibrary.ownedAbsent();
   }
 
   async function restoreAndVerify(snapshot) {

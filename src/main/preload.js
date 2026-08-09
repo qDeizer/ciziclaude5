@@ -34,9 +34,11 @@ contextBridge.exposeInMainWorld("cizi", {
 
   getClaudeState: () => ipcRenderer.invoke("cizi:getClaudeState"),
   getClaudeProgress: () => ipcRenderer.invoke("cizi:getClaudeProgress"),
-  connectClaude: (model, models) => ipcRenderer.invoke("cizi:connectClaude", { model, models }),
-  disconnectClaude: () => ipcRenderer.invoke("cizi:disconnectClaude"),
+  connectClaude: (model, models, closeRunning) => ipcRenderer.invoke("cizi:connectClaude", { model, models, closeRunning }),
+  disconnectClaude: (closeRunning) => ipcRenderer.invoke("cizi:disconnectClaude", { closeRunning }),
   installClaudeDesktop: () => ipcRenderer.invoke("cizi:installClaudeDesktop"),
+  planClaudeDesktopUninstall: () => ipcRenderer.invoke("cizi:planClaudeDesktopUninstall"),
+  uninstallClaudeDesktop: (removeLeftovers) => ipcRenderer.invoke("cizi:uninstallClaudeDesktop", { removeLeftovers }),
   launchClaudeDesktop: () => ipcRenderer.invoke("cizi:launchClaudeDesktop"),
   repairClaudeDesktop: () => ipcRenderer.invoke("cizi:repairClaudeDesktop"),
   stopClaudeDesktop: () => ipcRenderer.invoke("cizi:stopClaudeDesktop"),

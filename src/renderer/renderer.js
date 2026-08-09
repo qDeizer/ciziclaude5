@@ -10,6 +10,7 @@ var CLAUDE_CLI_STATUS = { installed: false, command: null, version: null };
 var CLAUDE_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
 var CLAUDE_STATE = { cli: { installed: false, applied: false }, desktop: { installed: false, applied: false }, connected: false, installedProducts: [] };
 var CLAUDE_PROGRESS = { phase: "idle", message: "", details: null };
+var CLAUDE_INSTALL_BUTTON = null;
 var CLAUDE_SELECTED_MODEL = null;
 var CODEX_CLI_STATUS = { installed: false, command: null, version: null };
 var CODEX_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
@@ -27,6 +28,9 @@ const CODEX_CLI_NAME = "Codex CLI";
 const CLAUDE_DESKTOP_NAME = "Claude Desktop";
 const CODEX_DESKTOP_NAME = "ChatGPT Desktop";
 var FIRST_RELEASE_TOOLS = [CLAUDE_CODE_CLI_TOOL_ID, CODEX_CLI_TOOL_ID];
+
+// The key's own model list decides which local products it may configure.
+const { modelNames, modelsForTool, toolIsUnlocked, toolIsGated } = window.ciziModelFamilies;
 
 function clog(level, msg, meta) {
   try {
@@ -316,19 +320,59 @@ const INSTALL_ACTIVITY_TARGETS = {
   "codex-desktop": { box: "codex-desktop-install-activity", name: CODEX_DESKTOP_NAME },
 };
 
+// While a Claude Desktop installation is running the button is the part of the
+// row the user watches, so it names the phase the installer is really in rather
+// than claiming "Kuruluyor" for the whole download.
+const CLAUDE_INSTALL_BUTTON_LABELS = {
+  starting: "Hazırlanıyor...",
+  downloading: "İndiriliyor...",
+  "verifying-signature": "İmza doğrulanıyor...",
+  installing: "Kuruluyor...",
+  verifying: "Doğrulanıyor...",
+};
+
 // Claude Desktop reports progress as (phase, message, details) from its own
 // transplanted engine. This maps that onto the activity panel the other tools
 // already use, so every long operation looks the same to the user.
+// The activity panel styles itself from `status`, so the phase has to be mapped
+// onto it rather than flattened to "installing". Reporting the download as
+// "installing" is what left the bar with no measurable step: the panel treats a
+// download percentage and an install percentage differently, and the download —
+// the only phase that has a real percentage — was never labelled as one.
+const CLAUDE_PROGRESS_STATUS = {
+  starting: "checking",
+  downloading: "downloading",
+  "verifying-signature": "verifying",
+  installing: "installing",
+  verifying: "verifying",
+  uninstalling: "installing",
+  configuring: "installing",
+  authenticating: "installing",
+  translating: "installing",
+  restoring: "installing",
+  stopping: "installing",
+  repairing: "installing",
+};
+
 function updateClaudeProgress(progress) {
   CLAUDE_PROGRESS = progress || { phase: "idle", message: "", details: null };
   const phase = String(CLAUDE_PROGRESS.phase || "");
-  const active = Boolean(phase) && phase !== "idle" && phase !== "complete" && Boolean(CLAUDE_PROGRESS.message);
   const percent = CLAUDE_PROGRESS.details && Number.isFinite(Number(CLAUDE_PROGRESS.details.percent))
     ? Number(CLAUDE_PROGRESS.details.percent)
     : null;
+  if (CLAUDE_INSTALL_BUTTON && CLAUDE_INSTALL_BUTTON_LABELS[phase]) {
+    // The download is minutes long, so its percentage goes on the button too —
+    // that is the control the user is looking at while they wait.
+    CLAUDE_INSTALL_BUTTON.textContent = phase === "downloading" && percent !== null
+      ? `İndiriliyor %${Math.round(percent)}`
+      : CLAUDE_INSTALL_BUTTON_LABELS[phase];
+  }
+  const active = Boolean(phase) && phase !== "idle" && phase !== "complete" && Boolean(CLAUDE_PROGRESS.message);
   const failed = phase === "error";
   renderCliInstallActivity({
-    status: failed ? "error" : phase === "complete" ? "installed" : active ? "installing" : "idle",
+    status: failed ? "error"
+      : phase === "complete" ? "installed"
+        : active ? (CLAUDE_PROGRESS_STATUS[phase] || "installing") : "idle",
     phase,
     percent: failed ? null : phase === "complete" ? 100 : percent,
     message: CLAUDE_PROGRESS.message || "",
@@ -348,12 +392,15 @@ function claudePhaseLabel(phase) {
   const labels = {
     starting: "Kuruluma hazırlanılıyor",
     downloading: "Claude Desktop indiriliyor",
+    "verifying-signature": "Dijital imza doğrulanıyor",
     installing: "Claude Desktop kuruluyor",
     verifying: "Kurulum doğrulanıyor",
+    uninstalling: "Claude Desktop kaldırılıyor",
     configuring: "Ayarlar uygulanıyor",
     authenticating: "Kimlik doğrulama hazırlanıyor",
     translating: "Arayüz paketi kontrol ediliyor",
     restoring: "Önceki ayarlara dönülüyor",
+    stopping: "Claude Desktop kapatılıyor",
     repairing: "Ayarlar yenileniyor",
     complete: "Tamamlandı",
     error: "İşlem tamamlanamadı",
@@ -494,16 +541,21 @@ function codexDefaultModel(models) {
   return ids.find((id) => /^gpt-/i.test(id)) || ids[0] || null;
 }
 
+// The shared-folder note below is a Codex-only concept: its two products read
+// one config file, so a removal has to say whether that file survives. Claude's
+// two products share nothing, and its plan carries no `sharedRemovable` flag —
+// the note is skipped entirely rather than defaulting to the "other Codex
+// product" wording it used to fall through to.
 function describeRemovalPlan(plan, productName) {
   const removeList = (plan?.remove || []).map((item) => `  • ${item.path}\n    (${item.reason})`).join("\n");
   const preserveList = (plan?.preserve || []).map((item) => `  • ${item.path}\n    (${item.reason})`).join("\n");
   const lines = [`${productName} kökten kaldırılacak.`, ""];
   if (removeList) lines.push("SİLİNECEK:", removeList, "");
   if (preserveList) lines.push("KORUNACAK:", preserveList, "");
-  if (plan?.sharedRemovable) {
+  if (plan?.sharedRemovable === true) {
     lines.push("Bu bilgisayarda başka Codex ürünü kalmıyor, bu yüzden ortak Codex klasörü de silinecek.");
     lines.push("Bu klasörde oturum bilgileri, sohbet geçmişi ve ayarlar bulunur.", "");
-  } else {
+  } else if (plan?.sharedRemovable === false) {
     lines.push("Diğer Codex ürünü kurulu olduğu için ortak klasöre ve ayar dosyasına dokunulmayacak.", "");
   }
   lines.push("Devam edilsin mi?");
@@ -634,6 +686,23 @@ function renderClaudeRow(st, models) {
     cb.disabled = true;
     const turningOn = cb.checked;
     clog("info", `Claude: ${turningOn ? "bağlanıyor" : "geri alınıyor"}`, { tool: st.id });
+    // Claude Desktop reads its managed configuration once at startup, so it has
+    // to be closed for the switch to change anything — and it opens itself right
+    // after being installed, which is exactly when the switch is first used.
+    // The main process reports that as a question rather than a failure; asking
+    // and retrying once is what makes the switch work instead of appearing dead.
+    const runWithRestartPrompt = async (attempt) => {
+      let result = await attempt(false);
+      if (!result.ok && result.code === "PROCESS_RUNNING_CONFIRMATION_REQUIRED") {
+        const proceed = confirm(turningOn
+          ? "Claude Desktop şu an açık.\n\nAyarların uygulanabilmesi için kapatılması gerekiyor. Kapatılsın mı?"
+          : "Claude Desktop şu an açık.\n\nÖnceki ayarlarınızın geri yüklenebilmesi için kapatılması gerekiyor. Kapatılsın mı?");
+        if (!proceed) return { ok: false, cancelled: true };
+        result = await attempt(true);
+      }
+      return result;
+    };
+
     let res;
     if (turningOn) {
       if (!CLAUDE_SELECTED_MODEL) {
@@ -642,21 +711,22 @@ function renderClaudeRow(st, models) {
         cb.disabled = false;
         return;
       }
-      res = await cizi.connectClaude(CLAUDE_SELECTED_MODEL, names);
+      res = await runWithRestartPrompt((closeRunning) =>
+        cizi.connectClaude(CLAUDE_SELECTED_MODEL, names, closeRunning));
       if (res.ok) {
         const products = res.data?.connectedProducts || [];
         toast(products.includes("desktop")
           ? "Claude bağlandı. Claude Desktop yeni ayarlarla açıldı."
           : "Claude Code CLI bağlandı.", "good");
       } else {
-        toast(clientMessage(res.error || "Claude bağlanamadı."), "bad");
+        if (!res.cancelled) toast(clientMessage(res.error || "Claude bağlanamadı."), "bad");
         cb.checked = false;
       }
     } else {
-      res = await cizi.disconnectClaude();
+      res = await runWithRestartPrompt((closeRunning) => cizi.disconnectClaude(closeRunning));
       if (res.ok) toast("Claude bağlantısı kaldırıldı; önceki ayarlarınız geri yüklendi.", "good");
       else {
-        toast(clientMessage(res.error || "Claude bağlantısı geri alınamadı."), "bad");
+        if (!res.cancelled) toast(clientMessage(res.error || "Claude bağlantısı geri alınamadı."), "bad");
         cb.checked = true;
       }
     }
@@ -768,10 +838,14 @@ function claudeDesktopBlock(desktop, connected) {
       onClick: async (event) => {
         const target = event.currentTarget;
         target.disabled = true;
-        target.textContent = "Kuruluyor...";
+        // The package is a quarter of a gigabyte: most of the wait is the
+        // download, so the button must not claim it is already installing.
+        CLAUDE_INSTALL_BUTTON = target;
+        target.textContent = "Hazırlanıyor...";
         updateClaudeProgress({ phase: "starting", message: "Claude Desktop kurulumu başlatılıyor...", details: null });
         let res;
         try { res = await cizi.installClaudeDesktop(); } catch (error) { res = { ok: false, error: error?.message || "Claude Desktop kurulamadı." }; }
+        CLAUDE_INSTALL_BUTTON = null;
         if (res.ok) {
           updateClaudeProgress({ phase: "complete", message: "Claude Desktop kuruldu.", details: null });
           toast("Claude Desktop kuruldu.", "good");
@@ -839,6 +913,44 @@ function claudeDesktopBlock(desktop, connected) {
         },
       }));
     }
+    // The other products all offer a root removal; Claude Desktop lost it in the
+    // port. It previews exactly what would be deleted before anything happens.
+    actions.appendChild(button({
+      label: "Kökten Kaldır", className: "ghost tiny-btn danger", cliId: "claude-desktop.purge",
+      cliLabel: "Claude Desktop kökten kaldır", long: true,
+      onClick: async (event) => {
+        const target = event.currentTarget;
+        target.disabled = true;
+        const planRes = await cizi.planClaudeDesktopUninstall();
+        if (!planRes.ok) {
+          target.disabled = false;
+          toast(clientMessage(planRes.error || "Kaldırma planı alınamadı."), "bad");
+          return;
+        }
+        if (!confirm(describeRemovalPlan(planRes.data, CLAUDE_DESKTOP_NAME))) {
+          target.disabled = false;
+          return;
+        }
+        target.textContent = "Kaldırılıyor...";
+        updateClaudeProgress({ phase: "uninstalling", message: "Claude Desktop kaldırılıyor...", details: null });
+        const res = await cizi.uninstallClaudeDesktop(true);
+        target.disabled = false;
+        target.textContent = "Kökten Kaldır";
+        if (res.ok) {
+          updateClaudeProgress({ phase: "complete", message: "Claude Desktop kaldırıldı.", details: null });
+          const remaining = res.data?.remainingDirectories?.length || 0;
+          toast(remaining
+            ? `Claude Desktop kaldırıldı. ${remaining} klasör silinemedi.`
+            : "Claude Desktop kökten kaldırıldı.", remaining ? "warn" : "good");
+          clog("success", "Claude Desktop kökten kaldırıldı");
+          setTimeout(() => updateClaudeProgress({ phase: "idle", message: "", details: null }), 2500);
+        } else {
+          updateClaudeProgress({ phase: "error", message: res.error || "Claude Desktop kaldırılamadı.", details: null });
+          toast(clientMessage(res.error || "Claude Desktop kaldırılamadı."), "bad");
+        }
+        await loadTemplatesAndTools();
+      },
+    }));
   }
 
   block.appendChild(head);
@@ -1108,13 +1220,17 @@ function renderTools(statuses) {
   const enabledIds = new Set(templateTools.filter((t) => t.enabled).map((t) => t.id));
   const offered = templateTools
     .map((t) => t.id)
-    .filter((id) => FIRST_RELEASE_TOOLS.includes(id));
+    .filter((id) => FIRST_RELEASE_TOOLS.includes(id))
+    // The key's own model families decide which products it may configure.
+    .filter((id) => !toolIsGated(id) || toolIsUnlocked(models, id));
   const defaultModel = getDefaultModel(models);
 
   if (!offered.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No command-line tool is available for this key.";
+    empty.textContent = modelNames(models).length
+      ? "Bu anahtarın modelleri hiçbir yerel araçla eşleşmiyor."
+      : "No command-line tool is available for this key.";
     list.appendChild(empty);
     return;
   }
@@ -1123,13 +1239,14 @@ function renderTools(statuses) {
     if (!offered.includes(st.id)) continue;
 
     // Claude and Codex are each one switch over two products, so their rows are
-    // built on their own instead of through the single-tool layout.
+    // built on their own instead of through the single-tool layout. Each row
+    // only ever sees the models of its own family.
     if (st.id === CODEX_CLI_TOOL_ID) {
-      list.appendChild(renderCodexRow(st, models));
+      list.appendChild(renderCodexRow(st, modelsForTool(models, CODEX_CLI_TOOL_ID)));
       continue;
     }
     if (st.id === CLAUDE_CODE_CLI_TOOL_ID) {
-      list.appendChild(renderClaudeRow(st, models));
+      list.appendChild(renderClaudeRow(st, modelsForTool(models, CLAUDE_CODE_CLI_TOOL_ID)));
       continue;
     }
 
