@@ -4,7 +4,7 @@ const lifecycle = require("./claudeLifecycle");
 
 const TASK_NAME = "Cizi Code Claude Reconcile";
 const TASK_ARGUMENTS = "--cizi-reconcile-active-tools";
-const TASK_DESCRIPTION = "Keeps the enabled Cizi Code integration compatible with official Claude Desktop updates.";
+const TASK_DESCRIPTION = "Periodically verifies every Cizi Code tool integration, repairs enabled configurations, and restores disabled ones.";
 const TASK_SCHEMA_VERSION = 1;
 const TASK_POLL_MINUTES = 15;
 

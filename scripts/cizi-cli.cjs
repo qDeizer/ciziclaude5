@@ -54,6 +54,7 @@ function usage() {
         "cizi-cli click login-btn",
         "cizi-cli switch tool.claude-code-cli.switch on",
         "cizi-cli switch tool.codex.switch on",
+        "cizi-cli click tool.reconcile-all",
         "cizi-cli select tool.codex.model gpt-5.6-terra",
         "cizi-cli click codex-desktop.install",
         "cizi-cli click codex-desktop.purge",
@@ -101,8 +102,10 @@ function request(state, payload) {
       "claude-desktop.install", "claude-desktop.purge",
       "codex-cli.install", "codex-cli.purge",
       "codex-desktop.install", "codex-desktop.purge",
+      "tool.reconcile-all",
+      "tool.claude.switch",
     ];
-    const timeoutMs = payload?.type === "click" && LONG_ACTIONS.includes(payload?.id)
+    const timeoutMs = ["click", "switch"].includes(payload?.type) && LONG_ACTIONS.includes(payload?.id)
       ? LONG_ACTION_TIMEOUT_MS
       : CONNECT_TIMEOUT_MS;
     socket.setTimeout(timeoutMs, () => finish(new Error("Cizi Code CLI bridge timed out.")));

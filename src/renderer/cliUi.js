@@ -157,7 +157,8 @@
       element.focus({ preventScroll: true });
       element.click();
       clicked = true;
-      await waitForPaint();
+      if (element.dataset.cliAwait === "long") await waitForLongClick(element);
+      else await waitForPaint();
     }
     return { action: "switch", id: cliId(element), value: !!element.checked, clicked, snapshot: snapshot() };
   }

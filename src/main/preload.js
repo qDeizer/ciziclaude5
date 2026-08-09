@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld("cizi", {
   listTools: () => ipcRenderer.invoke("cizi:listTools"),
   applyTool: (toolId, modelSlots) => ipcRenderer.invoke("cizi:applyTool", { toolId, modelSlots }),
   revertTool: (toolId) => ipcRenderer.invoke("cizi:revertTool", { toolId }),
+  reconcileTools: () => ipcRenderer.invoke("cizi:reconcileTools"),
 
   getLogs: (limit) => ipcRenderer.invoke("cizi:getLogs", { limit }),
   clearLogs: () => ipcRenderer.invoke("cizi:clearLogs"),

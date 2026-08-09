@@ -427,9 +427,12 @@ function renderCliInstallActivity(state, cli) {
   overall.className = "cli-activity-overall";
   const overallPercent = Number(state?.percent);
   const hasOverallPercent = state?.percent != null && Number.isFinite(overallPercent) && (overallPercent > 0 || state?.status === "installed");
-  overall.textContent = hasOverallPercent ? `${Math.round(overallPercent)}%` : "...";
+  overall.textContent = state?.status === "error"
+    ? "Hata"
+    : hasOverallPercent ? `${Math.round(overallPercent)}%` : "...";
   const pulse = document.createElement("span");
-  pulse.className = `cli-activity-pulse ${["installing", "downloading", "verifying", "checking"].includes(state?.status) || (state?.percent >= 0 && state?.percent < 100) ? "" : "hidden"}`;
+  const running = ["installing", "downloading", "verifying", "checking"].includes(state?.status);
+  pulse.className = `cli-activity-pulse ${running ? "" : "hidden"}`;
   pulse.textContent = "● live";
   pulse.title = "Installer is still running";
   header.appendChild(title);
@@ -487,9 +490,14 @@ function renderCliInstallActivity(state, cli) {
   track.className = "cli-operation-track";
   const fill = document.createElement("span");
   fill.className = "cli-operation-fill";
-  if (state?.status === "error") fill.classList.add("cli-operation-fill-error");
-  if (hasStepPercent) fill.style.width = `${Math.max(0, Math.min(100, stepPercent))}%`;
-  else fill.classList.add("indeterminate");
+  if (state?.status === "error") {
+    fill.classList.add("cli-operation-fill-error");
+    fill.style.width = "100%";
+  } else if (hasStepPercent) {
+    fill.style.width = `${Math.max(0, Math.min(100, stepPercent))}%`;
+  } else {
+    fill.classList.add("indeterminate");
+  }
   track.appendChild(fill);
   single.appendChild(track);
 
@@ -620,6 +628,7 @@ function renderClaudeRow(st, models) {
   const desktop = CLAUDE_STATE.desktop || { installed: false };
   const anyInstalled = Boolean(cli.installed || desktop.installed);
   const connected = CLAUDE_STATE.connected === true;
+  const desiredEnabled = CLAUDE_STATE.desiredEnabled == null ? connected : CLAUDE_STATE.desiredEnabled === true;
 
   const info = document.createElement("div");
   info.className = "tool-info";
@@ -628,7 +637,9 @@ function renderClaudeRow(st, models) {
   name.textContent = "Claude (Code CLI + Desktop)";
   const sub = document.createElement("div");
   sub.className = "tool-sub";
-  sub.textContent = CLAUDE_STATE.blockReason
+  sub.textContent = desiredEnabled && !connected
+    ? "Bağlantı açık tutuluyor; eksik Claude ayarları otomatik yeniden uygulanacak"
+    : CLAUDE_STATE.blockReason
     ? CLAUDE_STATE.blockReason
     : connected
       ? "Bağlı — tek anahtar kurulu olan Claude ürünlerini birlikte yönetiyor"
@@ -660,7 +671,7 @@ function renderClaudeRow(st, models) {
     modelSelect.appendChild(option);
   }
   // Claude Desktop pins one model at a time, so changing it means reconnecting.
-  modelSelect.disabled = connected;
+  modelSelect.disabled = desiredEnabled;
   modelSelect.title = connected ? "Modeli değiştirmek için önce bağlantıyı kapatın" : "";
   modelSelect.addEventListener("change", () => { CLAUDE_SELECTED_MODEL = modelSelect.value; });
   actions.appendChild(modelSelect);
@@ -673,7 +684,7 @@ function renderClaudeRow(st, models) {
   cb.dataset.cliLabel = "Claude bağlantısı";
   cb.dataset.cliAwait = "long";
   cb.dataset.cliAwaitTimeout = String(10 * 60 * 1000);
-  cb.checked = connected;
+  cb.checked = desiredEnabled;
   cb.disabled = !anyInstalled || CLAUDE_STATE.canConnect === false;
   if (!anyInstalled) sw.title = "Önce Claude Code CLI veya Claude Desktop kurun";
   const slider = document.createElement("span");
@@ -714,16 +725,21 @@ function renderClaudeRow(st, models) {
       res = await runWithRestartPrompt((closeRunning) =>
         cizi.connectClaude(CLAUDE_SELECTED_MODEL, names, closeRunning));
       if (res.ok) {
+        updateClaudeProgress({ phase: "complete", message: "Claude bağlantısı doğrulandı.", details: null });
         const products = res.data?.connectedProducts || [];
         toast(products.includes("desktop")
           ? "Claude bağlandı. Claude Desktop yeni ayarlarla açıldı."
           : "Claude Code CLI bağlandı.", "good");
       } else {
+        updateClaudeProgress({ phase: "error", message: res.error || "Claude bağlanamadı.", details: null });
         if (!res.cancelled) toast(clientMessage(res.error || "Claude bağlanamadı."), "bad");
         cb.checked = false;
       }
     } else {
       res = await runWithRestartPrompt((closeRunning) => cizi.disconnectClaude(closeRunning));
+      updateClaudeProgress(res.ok
+        ? { phase: "complete", message: "Claude ayarları geri yüklendi.", details: null }
+        : { phase: "error", message: res.error || "Claude ayarları geri yüklenemedi.", details: null });
       if (res.ok) toast("Claude bağlantısı kaldırıldı; önceki ayarlarınız geri yüklendi.", "good");
       else {
         if (!res.cancelled) toast(clientMessage(res.error || "Claude bağlantısı geri alınamadı."), "bad");
@@ -972,7 +988,10 @@ function renderCodexRow(st, models) {
   const sub = document.createElement("div");
   sub.className = "tool-sub";
   const anyInstalled = CODEX_DESKTOP_STATUS.installed || CODEX_CLI_STATUS.installed;
-  sub.textContent = st.applied
+  const desiredEnabled = st.desiredEnabled == null ? st.applied === true : st.desiredEnabled === true;
+  sub.textContent = desiredEnabled && !st.applied
+    ? "Bağlantı açık tutuluyor; eksik Codex ayarları otomatik yeniden uygulanacak"
+    : st.applied && desiredEnabled
     ? `Bağlı — tek ayar dosyası ikisini de yönetiyor (${CODEX_CONFIG_STATE.path || "~/.codex/config.toml"})`
     : anyInstalled
       ? "Tek anahtar ChatGPT Desktop ve Codex CLI'yi birlikte Cizi Code'a bağlar"
@@ -1022,7 +1041,7 @@ function renderCodexRow(st, models) {
   cb.type = "checkbox";
   cb.dataset.cliId = "tool.codex.switch";
   cb.dataset.cliLabel = "Codex bağlantısı";
-  cb.checked = !!st.applied;
+  cb.checked = desiredEnabled;
   cb.disabled = !anyInstalled;
   if (!anyInstalled) sw.title = "Önce ChatGPT Desktop veya Codex CLI kurun";
   const slider = document.createElement("span");
@@ -1262,8 +1281,11 @@ function renderTools(statuses) {
 
     const sub = document.createElement("div");
     sub.className = "tool-sub";
-    sub.textContent = st.applied
+    const desiredEnabled = st.desiredEnabled == null ? st.applied === true : st.desiredEnabled === true;
+    sub.textContent = st.applied && desiredEnabled
       ? `${st.name} is connected to Cizi Code`
+      : desiredEnabled
+        ? "Bağlantı açık tutuluyor; eksik ayarlar otomatik yeniden uygulanacak"
       : st.hasBackup
         ? "Turn on to reconnect, or leave off to keep your previous settings"
         : `Turn on to prepare ${st.name} automatically`;
@@ -1279,7 +1301,7 @@ function renderTools(statuses) {
     cb.type = "checkbox";
     cb.dataset.cliId = `tool.${st.id}.switch`;
     cb.dataset.cliLabel = `${st.name} connection`;
-    cb.checked = !!st.applied;
+    cb.checked = desiredEnabled;
     cb.disabled = enabledIds.size > 0 && !enabledIds.has(st.id);
     const slider = document.createElement("span");
     slider.className = "slider";
@@ -1427,6 +1449,34 @@ $("usage-refresh").addEventListener("click", async () => {
   } finally {
     btn.textContent = original;
     btn.disabled = false;
+  }
+});
+
+$("tool-reconcile-all").addEventListener("click", async () => {
+  const btn = $("tool-reconcile-all");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Doğrulanıyor...";
+  try {
+    const res = await cizi.reconcileTools();
+    if (!res.ok) {
+      toast(clientMessage(res.error || "Bağlantılar doğrulanamadı."), "bad");
+      return;
+    }
+    await loadTemplatesAndTools();
+    const report = res.data || {};
+    const message = report.failed
+      ? `${report.failed} bağlantı doğrulanamadı.`
+      : report.pending
+        ? `${report.repaired || 0} bağlantı düzeltildi; ${report.pending} işlem güvenli koşulları bekliyor.`
+        : report.repaired
+          ? `${report.repaired} bağlantı otomatik düzeltildi.`
+          : "Tüm bağlantılar doğrulandı.";
+    toast(message, report.failed ? "bad" : report.pending ? "warn" : "good");
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+    loadLogs();
   }
 });
 

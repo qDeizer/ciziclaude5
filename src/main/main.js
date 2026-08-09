@@ -14,6 +14,9 @@ const { createCodexDesktopService } = require("./codexDesktop");
 const codexConfig = require("./codexConfigFile");
 const claudeDesktopBackend = require("./tools/claudeDesktop");
 const claudeLifecycle = require("./tools/claudeLifecycle");
+const reconcileBackgroundTask = require("./tools/claudeReconcileTask");
+const toolIntentStore = require("./tools/toolIntentStore");
+const { CLAUDE_INTENT_ID, createIntegrationReconciler } = require("./tools/integrationReconciler");
 const { createClaudeCoordinator } = require("./claudeCoordinator");
 const log = require("./logger");
 const { CliBridge } = require("./cliBridge");
@@ -21,6 +24,8 @@ const { CliBridge } = require("./cliBridge");
 const execFileAsync = promisify(execFile);
 const CLAUDE_CODE_OFFICIAL_URL = "https://code.claude.com/docs/en/getting-started";
 const CLAUDE_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const RECONCILE_INTERVAL_MS = Number(process.env.CIZI_RECONCILE_INTERVAL_MS) || 5 * 60 * 1000;
+const HEADLESS_RECONCILE = process.argv.includes("--cizi-reconcile-active-tools");
 
 // The CLI launcher can be invoked repeatedly while the desktop process is
 // already starting. Keep one desktop process (and therefore one installer
@@ -68,6 +73,30 @@ const claude = createClaudeCoordinator({
     broadcast("cizi:claudeProgress", claudeProgressState);
   },
 });
+const integrationReconciler = createIntegrationReconciler({
+  toolManager: toolMgr,
+  claude,
+  intentStore: toolIntentStore,
+  getSession: () => session,
+  baseUrl: api.TOOL_BASE_URL,
+  log,
+  backgroundTask: reconcileBackgroundTask,
+  intervalMs: RECONCILE_INTERVAL_MS,
+});
+
+function desiredToolState(toolId, applied) {
+  const intent = toolIntentStore.get(toolId);
+  return intent ? intent.enabled : applied === true;
+}
+
+async function ensureReconcileMonitor() {
+  try {
+    return await reconcileBackgroundTask.ensure();
+  } catch (error) {
+    log.error("reconcile", `Periyodik tool denetim görevi kurulamadı: ${safeMessage(error)}`);
+    return { current: false, errorCode: String(error?.code || "RECONCILE_TASK_FAILED") };
+  }
+}
 
 function shouldBlockDevToolsShortcut(input) {
   const key = String(input.key || "").toLowerCase();
@@ -721,11 +750,27 @@ if (hasSingleInstanceLock) {
       log.warn("auth", "Failed to load saved session");
     }
 
+    if (HEADLESS_RECONCILE) {
+      integrationReconciler.run("scheduled-task")
+        .then((result) => {
+          log.info("reconcile", "Zamanlanmış tool denetimi tamamlandı", {
+            repaired: result.repaired,
+            pending: result.pending,
+            failed: result.failed,
+          });
+        })
+        .catch((error) => log.error("reconcile", `Zamanlanmış tool denetimi başarısız: ${safeMessage(error)}`))
+        .finally(() => app.quit());
+      return;
+    }
+
     createWindow();
     cliBridge.start().catch((err) => {
       log.error("cli", `CLI bridge could not start: ${safeMessage(err)}`);
     });
     setTimeout(() => checkForUpdates().catch(() => {}), 2500);
+    setTimeout(() => integrationReconciler.run("startup").catch(() => {}), 4000);
+    integrationReconciler.start();
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -737,7 +782,10 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("will-quit", () => cliBridge.stop());
+app.on("will-quit", () => {
+  integrationReconciler.stop();
+  cliBridge.stop();
+});
 
 ipcMain.on("cizi:cliReady", (event) => cliBridge.markRendererReady(event.sender));
 ipcMain.on("cizi:cliResponse", (event, response) => cliBridge.handleRendererResponse(event.sender, response));
@@ -832,7 +880,10 @@ ipcMain.handle("cizi:openCodexCliSite", wrap("openCodexCliSite", async () => {
 }));
 
 // Claude: one switch over Claude Code CLI + Claude Desktop.
-ipcMain.handle("cizi:getClaudeState", wrap("getClaudeState", async () => claude.getState(api.TOOL_BASE_URL)));
+ipcMain.handle("cizi:getClaudeState", wrap("getClaudeState", async () => {
+  const state = await claude.getState(api.TOOL_BASE_URL);
+  return { ...state, desiredEnabled: desiredToolState(CLAUDE_INTENT_ID, state.connected) };
+}));
 ipcMain.handle("cizi:getClaudeProgress", wrap("getClaudeProgress", async () => claudeProgressState));
 
 ipcMain.handle("cizi:connectClaude", wrap("connectClaude", async ({ model, models, closeRunning } = {}) => {
@@ -847,11 +898,36 @@ ipcMain.handle("cizi:connectClaude", wrap("connectClaude", async ({ model, model
     haiku: model,
     models: Array.isArray(models) && models.length ? models : [model],
   };
-  return claude.connect(values, { closeRunning: closeRunning === true });
+  try {
+    const result = await claude.connect(values, { closeRunning: closeRunning === true });
+    toolIntentStore.set(CLAUDE_INTENT_ID, true, values);
+    await ensureReconcileMonitor();
+    return result;
+  } catch (error) {
+    // A failed two-product transaction means the visible switch remains off.
+    // Persist that intent before the repair pass so a stranded CLI half is
+    // restored even when the original rollback was interrupted.
+    if (error?.code !== "PROCESS_RUNNING_CONFIRMATION_REQUIRED") {
+      toolIntentStore.set(CLAUDE_INTENT_ID, false, values);
+      await integrationReconciler.run("claude-connect-failed");
+    }
+    throw error;
+  }
 }));
 
-ipcMain.handle("cizi:disconnectClaude", wrap("disconnectClaude", async ({ closeRunning } = {}) =>
-  claude.disconnect(api.TOOL_BASE_URL, { closeRunning: closeRunning === true })));
+ipcMain.handle("cizi:disconnectClaude", wrap("disconnectClaude", async ({ closeRunning } = {}) => {
+  try {
+    const result = await claude.disconnect(api.TOOL_BASE_URL, { closeRunning: closeRunning === true });
+    toolIntentStore.set(CLAUDE_INTENT_ID, false);
+    await ensureReconcileMonitor();
+    return result;
+  } catch (error) {
+    if (error?.code !== "PROCESS_RUNNING_CONFIRMATION_REQUIRED") {
+      toolIntentStore.set(CLAUDE_INTENT_ID, false);
+    }
+    throw error;
+  }
+}));
 ipcMain.handle("cizi:installClaudeDesktop", wrap("installClaudeDesktop", async () => claude.installDesktop()));
 ipcMain.handle("cizi:planClaudeDesktopUninstall", wrap("planClaudeDesktopUninstall", async () => claude.planDesktopUninstall()));
 ipcMain.handle("cizi:uninstallClaudeDesktop", wrap("uninstallClaudeDesktop", async ({ removeLeftovers } = {}) =>
@@ -886,6 +962,7 @@ ipcMain.handle("cizi:getCodexState", wrap("getCodexState", async () => {
     cli,
     desktop,
     config: { ...config, tokenConfigured: config.tokenConfigured === true },
+    desiredEnabled: desiredToolState("codex", config.applied),
     sharesConfig: true,
     configPath: codexConfig.configPath(),
   };
@@ -897,12 +974,19 @@ ipcMain.handle("cizi:setCodexModel", wrap("setCodexModel", async ({ model } = {}
   const state = codexConfig.readState(api.TOOL_BASE_URL);
   if (!state.applied) throw new Error("Model değiştirmeden önce Codex bağlantısını açın.");
   const result = codexConfig.setModel(model);
+  const intent = toolIntentStore.get("codex");
+  if (intent?.enabled) toolIntentStore.set("codex", true, { ...intent.values, model });
   const desktop = await codexDesktop.detect();
   log.info("codex", "Codex modeli değiştirildi", { model: result.model, changed: result.changed });
   return { ...result, restartRequired: desktop.installed, desktopInstalled: desktop.installed };
 }));
 
-ipcMain.handle("cizi:listTools", wrap("listTools", async () => toolMgr.listToolStatuses(api.TOOL_BASE_URL)));
+ipcMain.handle("cizi:listTools", wrap("listTools", async () => toolMgr.listToolStatuses(api.TOOL_BASE_URL).map((status) => ({
+  ...status,
+  desiredEnabled: status.id === "claude-code"
+    ? desiredToolState(CLAUDE_INTENT_ID, status.applied)
+    : desiredToolState(status.id, status.applied),
+}))));
 
 ipcMain.handle("cizi:applyTool", wrap("applyTool", async ({ toolId, modelSlots }) => {
   const s = requireSession();
@@ -919,13 +1003,17 @@ ipcMain.handle("cizi:applyTool", wrap("applyTool", async ({ toolId, modelSlots }
   if (!values.model) throw new Error("Select a model first.");
   log.info("tools", `Apply ${toolId}`, { model: values.model });
   const res = toolMgr.applyTool(toolId, values);
+  toolIntentStore.set(toolId, true, values);
+  await ensureReconcileMonitor();
   log.info("tools", `Applied ${toolId}`, { hasBackup: res?.hasBackup });
   return res;
 }));
 
 ipcMain.handle("cizi:revertTool", wrap("revertTool", async ({ toolId }) => {
   log.info("tools", `Revert ${toolId}`);
+  toolIntentStore.set(toolId, false);
   const res = toolMgr.revertTool(toolId, api.TOOL_BASE_URL);
+  await ensureReconcileMonitor();
   // A surgical revert reports restored=false by design: it undoes only its own
   // keys instead of putting a whole snapshot back over the file.
   log.info("tools", `Reverted ${toolId}`, {
@@ -936,6 +1024,8 @@ ipcMain.handle("cizi:revertTool", wrap("revertTool", async ({ toolId }) => {
   });
   return res;
 }));
+
+ipcMain.handle("cizi:reconcileTools", wrap("reconcileTools", async () => integrationReconciler.run("manual")));
 
 ipcMain.handle("cizi:openExternal", wrap("openExternal", async ({ url }) => {
   await shell.openExternal(assertHttpsUrl(url, "External URL"));

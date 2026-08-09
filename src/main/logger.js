@@ -65,7 +65,11 @@ function log(level, scope, message, meta) {
 module.exports = {
   log,
   info: (scope, msg, meta) => log("info", scope, msg, meta),
-  warn: (scope, msg, meta) => log("warn", scope, msg, meta),
+  success: (scope, msg, meta) => log("success", scope, msg, meta),
+  warning: (scope, msg, meta) => log("warning", scope, msg, meta),
+  // Backward-compatible alias for older call sites. New flows use the
+  // documented `warning` level so persisted logs have one stable vocabulary.
+  warn: (scope, msg, meta) => log("warning", scope, msg, meta),
   error: (scope, msg, meta) => log("error", scope, msg, meta),
   debug: (scope, msg, meta) => log("debug", scope, msg, meta),
   recent: (limit = 300) => buffer.slice(-Math.max(1, Math.min(limit, MAX_BUFFER))),

@@ -185,9 +185,23 @@ function createClaudeCoordinator({
         // Undo the CLI half so the two never disagree about being connected.
         if (cliApplied) {
           try {
-            toolManager.revertTool(CLAUDE_CODE_TOOL_ID, values.base);
+            const rollback = toolManager.revertTool(CLAUDE_CODE_TOOL_ID, values.base);
+            const rollbackStatus = toolManager.getToolStatus(CLAUDE_CODE_TOOL_ID, values.base);
+            if (rollback?.applied === true || rollbackStatus?.applied === true) {
+              error.rollbackError = codedError(
+                "CLAUDE_CLI_ROLLBACK_VERIFY_FAILED",
+                "Claude Code CLI settings could not be restored after Claude Desktop failed.",
+              );
+              log?.error("claude", "Claude Desktop bağlantısı başarısız oldu ve Claude Code CLI geri alma işlemi doğrulanamadı", {
+                rollback: "failed",
+                stillApplied: true,
+              });
+            } else {
+              log?.success?.("claude", "Claude Code CLI geri alma işlemi doğrulandı", { rollback: "verified" });
+            }
             log?.info("claude", "Claude Desktop bağlanamadığı için Claude Code CLI ayarı geri alındı");
           } catch (revertError) {
+            error.rollbackError = revertError;
             log?.error("claude", `Claude Code CLI geri alınamadı: ${revertError?.message || revertError}`);
           }
         }

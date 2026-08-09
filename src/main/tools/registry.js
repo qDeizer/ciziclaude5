@@ -76,8 +76,22 @@ const TOOLS = {
     isApplied(expectedBase) {
       const cfg = readJson(path.join(home(), ".claude", "settings.json"));
       const url = cfg?.env?.ANTHROPIC_BASE_URL;
-      if (!url) return false;
+      const complete = Boolean(url
+        && cfg?.env?.ANTHROPIC_AUTH_TOKEN
+        && cfg?.env?.ANTHROPIC_DEFAULT_OPUS_MODEL
+        && cfg?.env?.ANTHROPIC_DEFAULT_SONNET_MODEL
+        && cfg?.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+      if (!complete) return false;
       return expectedBase ? url === withV1(expectedBase) : true;
+    },
+    matches(v) {
+      const cfg = readJson(path.join(home(), ".claude", "settings.json"));
+      const env = cfg?.env || {};
+      return env.ANTHROPIC_BASE_URL === withV1(v.base)
+        && env.ANTHROPIC_AUTH_TOKEN === v.apiKey
+        && env.ANTHROPIC_DEFAULT_OPUS_MODEL === (v.opus || v.model)
+        && env.ANTHROPIC_DEFAULT_SONNET_MODEL === (v.sonnet || v.model)
+        && env.ANTHROPIC_DEFAULT_HAIKU_MODEL === (v.haiku || v.model);
     },
     cleanup(expectedBase) {
       const file = path.join(home(), ".claude", "settings.json");
@@ -120,7 +134,12 @@ const TOOLS = {
       try { fs.rmSync(path.join(home(), ".codex", "cizicode.config.toml"), { force: true }); } catch { /* nothing to clean up */ }
     },
     isApplied(expectedBase) {
-      return codexConfig.readState(expectedBase).applied;
+      const state = codexConfig.readState(expectedBase);
+      return state.applied && state.tokenConfigured && Boolean(state.model);
+    },
+    matches(v) {
+      const state = codexConfig.readState(v.base);
+      return state.applied && state.tokenConfigured && state.model === v.model;
     },
     cleanup(expectedBase, { snapshot } = {}) {
       const state = codexConfig.readState();
@@ -157,8 +176,35 @@ const TOOLS = {
     },
     isApplied(expectedBase) {
       const s = readJson(path.join(home(), ".cline", "data", "globalState.json"));
-      if (!(s?.actModeApiProvider === "openai" && s?.openAiBaseUrl)) return false;
+      const secrets = readJson(path.join(home(), ".cline", "data", "secrets.json"));
+      if (!(s?.actModeApiProvider === "openai" && s?.openAiBaseUrl && s?.openAiModelId && secrets?.openAiApiKey)) return false;
       return expectedBase ? s.openAiBaseUrl === withoutV1(expectedBase) : true;
+    },
+    matches(v) {
+      const s = readJson(path.join(home(), ".cline", "data", "globalState.json"));
+      const secrets = readJson(path.join(home(), ".cline", "data", "secrets.json"));
+      return s?.actModeApiProvider === "openai"
+        && s?.planModeApiProvider === "openai"
+        && s?.openAiBaseUrl === withoutV1(v.base)
+        && s?.openAiModelId === v.model
+        && s?.planModeOpenAiModelId === v.model
+        && secrets?.openAiApiKey === v.apiKey;
+    },
+    cleanup(expectedBase) {
+      const stateFile = path.join(home(), ".cline", "data", "globalState.json");
+      const secretsFile = path.join(home(), ".cline", "data", "secrets.json");
+      const state = readJson(stateFile);
+      if (!state || (expectedBase && state.openAiBaseUrl !== withoutV1(expectedBase))) return { changed: false, reason: "different-endpoint" };
+      const next = { ...state };
+      for (const key of ["actModeApiProvider", "planModeApiProvider", "openAiBaseUrl", "openAiModelId", "planModeOpenAiModelId"]) delete next[key];
+      writeJson(stateFile, next);
+      const secrets = readJson(secretsFile);
+      if (secrets) {
+        const nextSecrets = { ...secrets };
+        delete nextSecrets.openAiApiKey;
+        writeJson(secretsFile, nextSecrets);
+      }
+      return { changed: true, files: [stateFile, secretsFile] };
     },
   },
 
@@ -182,8 +228,31 @@ const TOOLS = {
     isApplied(expectedBase) {
       const a = readJson(path.join(home(), ".local", "share", "kilo", "auth.json"));
       const oc = a && (a["openai-compatible"] || a["cizicode"] || a["9router"]);
-      if (!oc) return false;
+      if (!oc?.apiKey || !oc?.model) return false;
       return expectedBase ? oc.baseUrl === withV1(expectedBase) : true;
+    },
+    matches(v) {
+      const a = readJson(path.join(home(), ".local", "share", "kilo", "auth.json"));
+      const oc = a?.["openai-compatible"];
+      return oc?.baseUrl === withV1(v.base) && oc?.apiKey === v.apiKey && oc?.model === v.model;
+    },
+    cleanup(expectedBase) {
+      const authFile = path.join(home(), ".local", "share", "kilo", "auth.json");
+      const auth = readJson(authFile);
+      const provider = auth?.["openai-compatible"];
+      if (!provider || (expectedBase && provider.baseUrl !== withV1(expectedBase))) return { changed: false, reason: "different-endpoint" };
+      const nextAuth = { ...auth };
+      delete nextAuth["openai-compatible"];
+      writeJson(authFile, nextAuth);
+      const vsFile = vscodeSettingsPath();
+      const vs = readJson(vsFile);
+      if (vs?.["kilocode.customProvider"]?.baseURL === withV1(expectedBase)) {
+        const nextVs = { ...vs };
+        delete nextVs["kilocode.customProvider"];
+        delete nextVs["kilocode.defaultModel"];
+        writeJson(vsFile, nextVs);
+      }
+      return { changed: true, files: [authFile, vsFile] };
     },
   },
 
@@ -202,8 +271,27 @@ const TOOLS = {
     },
     isApplied(expectedBase) {
       const vs = readJson(vscodeSettingsPath());
-      if (!(vs?.["roo-cline.apiProvider"] === "openai" && vs?.["roo-cline.openAiBaseUrl"])) return false;
+      if (!(vs?.["roo-cline.apiProvider"] === "openai"
+        && vs?.["roo-cline.openAiBaseUrl"]
+        && vs?.["roo-cline.openAiApiKey"]
+        && vs?.["roo-cline.openAiModelId"])) return false;
       return expectedBase ? vs["roo-cline.openAiBaseUrl"] === withV1(expectedBase) : true;
+    },
+    matches(v) {
+      const vs = readJson(vscodeSettingsPath());
+      return vs?.["roo-cline.apiProvider"] === "openai"
+        && vs?.["roo-cline.openAiBaseUrl"] === withV1(v.base)
+        && vs?.["roo-cline.openAiApiKey"] === v.apiKey
+        && vs?.["roo-cline.openAiModelId"] === v.model;
+    },
+    cleanup(expectedBase) {
+      const file = vscodeSettingsPath();
+      const vs = readJson(file);
+      if (!vs || (expectedBase && vs["roo-cline.openAiBaseUrl"] !== withV1(expectedBase))) return { changed: false, reason: "different-endpoint" };
+      const next = { ...vs };
+      for (const key of ["roo-cline.apiProvider", "roo-cline.openAiBaseUrl", "roo-cline.openAiApiKey", "roo-cline.openAiModelId"]) delete next[key];
+      writeJson(file, next);
+      return { changed: true, file };
     },
   },
 
@@ -230,8 +318,31 @@ const TOOLS = {
     },
     isApplied(expectedBase) {
       const cfg = readJson(path.join(home(), ".config", "opencode", "opencode.json"));
-      if (!cfg?.provider?.cizicode) return false;
+      if (!cfg?.provider?.cizicode?.options?.apiKey || !cfg?.model?.startsWith("cizicode/")) return false;
       return expectedBase ? cfg.provider.cizicode?.options?.baseURL === withV1(expectedBase) : true;
+    },
+    matches(v) {
+      const cfg = readJson(path.join(home(), ".config", "opencode", "opencode.json"));
+      return cfg?.provider?.cizicode?.options?.baseURL === withV1(v.base)
+        && cfg?.provider?.cizicode?.options?.apiKey === v.apiKey
+        && cfg?.model === `cizicode/${v.model}`;
+    },
+    cleanup(expectedBase) {
+      const file = path.join(home(), ".config", "opencode", "opencode.json");
+      const cfg = readJson(file);
+      const provider = cfg?.provider?.cizicode;
+      if (!provider || (expectedBase && provider.options?.baseURL !== withV1(expectedBase))) return { changed: false, reason: "different-endpoint" };
+      const next = { ...cfg, provider: { ...(cfg.provider || {}) } };
+      delete next.provider.cizicode;
+      if (Object.keys(next.provider).length === 0) delete next.provider;
+      if (String(next.model || "").startsWith("cizicode/")) delete next.model;
+      if (next.agent?.explorer?.model?.startsWith("cizicode/")) {
+        next.agent = { ...next.agent };
+        delete next.agent.explorer;
+        if (Object.keys(next.agent).length === 0) delete next.agent;
+      }
+      writeJson(file, next);
+      return { changed: true, file };
     },
   },
 };

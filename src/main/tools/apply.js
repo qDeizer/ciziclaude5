@@ -45,6 +45,18 @@ function safeApplied(tool, base) {
   try { return tool.isApplied(base); } catch { return false; }
 }
 
+function verifyTool(toolId, values) {
+  const tool = getTool(toolId);
+  if (!tool) return false;
+  try {
+    return typeof tool.matches === "function"
+      ? tool.matches(values)
+      : tool.isApplied(values?.base);
+  } catch {
+    return false;
+  }
+}
+
 function getToolStatus(toolId, base) {
   const tool = getTool(toolId);
   if (!tool) return null;
@@ -61,4 +73,4 @@ function listToolStatuses(base) {
   return listToolIds().map((id) => getToolStatus(id, base));
 }
 
-module.exports = { applyTool, revertTool, getToolStatus, listToolStatuses };
+module.exports = { applyTool, revertTool, verifyTool, getToolStatus, listToolStatuses };
