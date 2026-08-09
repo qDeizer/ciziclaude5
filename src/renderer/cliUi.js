@@ -120,7 +120,7 @@
   }
 
   async function waitForLongClick(element) {
-    const timeoutMs = Number(element.dataset.cliAwaitTimeout || 5 * 60 * 1000);
+    const timeoutMs = Number(element.dataset.cliAwaitTimeout || 10 * 60 * 1000);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       // Install success replaces the old control; failure re-enables it.

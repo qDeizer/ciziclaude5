@@ -152,28 +152,26 @@ const TOOLS = {
   },
 
   codex: {
-    id: "codex", name: "Codex", apiType: "openai",
-    files: () => [path.join(home(), ".codex", "config.toml"), path.join(home(), ".codex", "auth.json")],
+    id: "codex", name: "Codex CLI", apiType: "openai",
+    files: () => [path.join(home(), ".codex", "cizicode.config.toml")],
     apply(v) {
-      const cfgFile = path.join(home(), ".codex", "config.toml");
-      const authFile = path.join(home(), ".codex", "auth.json");
-      // config.toml (round-trip via confbox to preserve existing structure)
-      let cfg = {};
-      const existing = readText(cfgFile);
-      if (existing) { try { cfg = parseSimpleToml(existing); } catch { cfg = {}; } }
-      cfg.model = v.model;
-      cfg.model_provider = "cizicode";
-      cfg.model_providers = { ...(cfg.model_providers || {}), cizicode: { name: "Cizi Code", base_url: withV1(v.base), wire_api: "responses" } };
-      cfg.agents = { ...(cfg.agents || {}), subagent: { model: v.model } };
-      writeText(cfgFile, stringifySimpleToml(cfg));
-      // auth.json
-      const auth = readJson(authFile) || {};
-      auth.OPENAI_API_KEY = v.apiKey;
-      auth.auth_mode = "apikey";
-      writeJson(authFile, auth);
+      const cfgFile = path.join(home(), ".codex", "cizicode.config.toml");
+      const config = {
+        model: v.model,
+        model_provider: "cizicode",
+        model_providers: {
+          cizicode: {
+            name: "Cizi Code",
+            base_url: withV1(v.base),
+            wire_api: "responses",
+            experimental_bearer_token: v.apiKey,
+          },
+        },
+      };
+      writeText(cfgFile, stringifySimpleToml(config));
     },
     isApplied(expectedBase) {
-      const txt = readText(path.join(home(), ".codex", "config.toml")) || "";
+      const txt = readText(path.join(home(), ".codex", "cizicode.config.toml")) || "";
       const isCizi = txt.includes('model_provider = "cizicode"') || txt.includes("[model_providers.cizicode]");
       if (!isCizi) return false;
       return expectedBase ? txt.includes(`base_url = "${withV1(expectedBase)}"`) : true;

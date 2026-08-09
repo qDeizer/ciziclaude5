@@ -132,10 +132,14 @@ button.ghost:hover { background: rgba(255, 252, 232, 0.8); }
 .cli-activity-head, .cli-operation-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .cli-activity-head { font-size: 13px; }
 .cli-activity-overall { font-weight: 700; color: var(--accent); }
+.cli-activity-pulse { font-size: 10px; font-weight: 800; letter-spacing: 0.3px; color: var(--good); animation: cli-live-pulse 1s ease-in-out infinite alternate; }
+.cli-activity-hint { margin-top: 6px; font-size: 11px; color: var(--muted); font-style: italic; }
 .cli-activity-message { margin-top: 4px; color: var(--muted); font-size: 12px; }
+@keyframes cli-live-pulse { from { opacity: 0.35; } to { opacity: 1; } }
 .cli-operation-list { display: flex; flex-direction: column; gap: 9px; margin-top: 11px; }
 .cli-operation { padding-top: 8px; border-top: 1px solid rgba(88, 96, 77, 0.16); }
 .cli-operation:first-child { padding-top: 0; border-top: 0; }
+.cli-step { font-size: 11px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
 .cli-operation-label, .cli-operation-percent { font-size: 11px; font-weight: 700; }
 .cli-operation-percent { color: var(--muted); }
 .cli-operation-track { height: 6px; margin-top: 4px; overflow: hidden; border-radius: 99px; background: var(--card-2); border: 1px solid var(--border); }

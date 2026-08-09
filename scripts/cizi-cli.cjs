@@ -16,7 +16,7 @@ const STATE_PATH = process.env.CIZI_CLI_STATE || path.join(
 );
 const CONNECT_TIMEOUT_MS = 2500;
 const START_TIMEOUT_MS = 15000;
-const LONG_ACTION_TIMEOUT_MS = 5 * 60 * 1000;
+const LONG_ACTION_TIMEOUT_MS = 10 * 60 * 1000;
 
 function maskSecrets(value) {
   if (typeof value === "string") {
@@ -86,7 +86,7 @@ function request(state, payload) {
       if (error) reject(error);
       else resolve(result);
     };
-    const timeoutMs = payload?.type === "click" && payload?.id === "claude-code-cli.install"
+    const timeoutMs = payload?.type === "click" && ["claude-code-cli.install", "codex-cli.install"].includes(payload?.id)
       ? LONG_ACTION_TIMEOUT_MS
       : CONNECT_TIMEOUT_MS;
     socket.setTimeout(timeoutMs, () => finish(new Error("Cizi Code CLI bridge timed out.")));

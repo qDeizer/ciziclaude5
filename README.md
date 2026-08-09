@@ -38,6 +38,16 @@ and `Go to official site`. The installer button downloads and runs Anthropic's
 official installer script, reports download and installer activity, and
 re-checks the local `claude` command before enabling the configuration switch.
 
+Codex CLI follows the same desktop and renderer-CLI flow. Cizi Code detects an
+existing standalone or npm installation, offers `İndir ve Kur` with the
+official OpenAI installer and exposes step-by-step activity. Once installed,
+the Codex switch writes only `~/.codex/cizicode.config.toml`; it keeps the
+user's primary Codex configuration untouched and stores the Cizi API key only
+as `experimental_bearer_token` in that provider profile. The `Aç` button runs
+the `cizicode` profile. `Kökten Kaldır` only removes the verified standalone
+CLI paths, the Cizi Code profile, and its exact User PATH entry; Codex Desktop
+and ChatGPT Desktop are preserved.
+
 ## Paketleme
 ```bash
 npm run dist:win    # Windows .exe (NSIS)

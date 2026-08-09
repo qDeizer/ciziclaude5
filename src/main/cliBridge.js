@@ -10,7 +10,7 @@ const { app } = require("electron");
 const STATE_FILE_NAME = "cli-bridge.json";
 const MAX_REQUEST_BYTES = 64 * 1024;
 const RENDERER_TIMEOUT_MS = 15000;
-const LONG_RENDERER_TIMEOUT_MS = 5 * 60 * 1000;
+const LONG_RENDERER_TIMEOUT_MS = 10 * 60 * 1000;
 
 function safeJson(value) {
   try {
@@ -67,18 +67,34 @@ class CliBridge {
 
   markRendererReady(sender) {
     const win = this.getWindow();
-    if (!win || sender !== win.webContents) return;
+    const wc = this.safeWebContents(win);
+    if (!wc || sender !== wc) return;
     this.rendererSender = sender;
     this.log.info("cli", "Renderer UI bridge ready");
   }
 
   markRendererUnavailable(sender) {
     if (!sender || sender === this.rendererSender) this.rendererSender = null;
+    if (this.rendererSender && this.rendererSender.isDestroyed && this.rendererSender.isDestroyed()) {
+      this.rendererSender = null;
+    }
+  }
+
+  safeWebContents(win) {
+    try {
+      if (!win || win.isDestroyed()) return null;
+      const wc = win.webContents;
+      if (!wc || wc.isDestroyed()) return null;
+      return wc;
+    } catch {
+      return null;
+    }
   }
 
   handleRendererResponse(sender, response) {
     const win = this.getWindow();
-    if (!win || sender !== win.webContents) return;
+    const wc = this.safeWebContents(win);
+    if (!wc || sender !== wc) return;
     const pending = this.pending.get(response?.requestId);
     if (!pending) return;
     this.pending.delete(response.requestId);
@@ -133,14 +149,15 @@ class CliBridge {
 
   async requestRenderer(request) {
     const win = this.getWindow();
-    if (!win || win.isDestroyed()) throw new Error("Cizi Code window is not available.");
+    const wc = this.safeWebContents(win);
+    if (!wc) throw new Error("Cizi Code window is not available.");
     if (!this.rendererSender || this.rendererSender.isDestroyed()) {
       throw new Error("Cizi Code UI is still loading; retry shortly.");
     }
     const requestId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
     const payload = { ...request, requestId };
     return new Promise((resolve, reject) => {
-      const timeoutMs = request?.type === "click" && request?.id === "claude-code-cli.install"
+      const timeoutMs = request?.type === "click" && ["claude-code-cli.install", "codex-cli.install"].includes(request?.id)
         ? LONG_RENDERER_TIMEOUT_MS
         : RENDERER_TIMEOUT_MS;
       const timer = setTimeout(() => {
@@ -149,7 +166,7 @@ class CliBridge {
       }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
       try {
-        win.webContents.send("cizi:cliRequest", payload);
+        wc.send("cizi:cliRequest", payload);
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(requestId);

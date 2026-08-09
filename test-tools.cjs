@@ -45,6 +45,11 @@ for (const id of listToolIds()) {
   const blob = files.map((f) => { try { return fs.readFileSync(f, "utf-8"); } catch { return ""; } }).join("\n");
   assert(/interface\.cizicode\.me/.test(blob), "gateway base url written");
   assert(/sk-cizi-TEST/.test(blob), "api key written");
+  if (id === "codex") {
+    assert(/experimental_bearer_token\s*=\s*"sk-cizi-TEST"/.test(blob), "Codex token is written directly to its provider config");
+    assert(!/env_key\s*=/.test(blob), "Codex config does not depend on an environment variable");
+    assert(files[0].endsWith(".codex" + path.sep + "cizicode.config.toml"), "Codex uses its dedicated Cizi Code profile file");
+  }
 
   const r = revertTool(id);
   assert(r.restored, "revert restored");

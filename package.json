@@ -10,7 +10,7 @@
   "scripts": {
     "start": "electron .",
     "cli": "node scripts/cizi-cli.cjs",
-    "test": "node test-cli-contract.cjs && node test-tools.cjs",
+    "test": "node test-cli-contract.cjs && node test-codex-cli.cjs && node test-tools.cjs",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",

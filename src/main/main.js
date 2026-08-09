@@ -8,12 +8,14 @@ const { promisify } = require("util");
 const store = require("./store");
 const api = require("./apiClient");
 const toolMgr = require("./tools/apply");
+const claudeUninstall = require("./claudeUninstall");
+const { createCodexCliService } = require("./codexCli");
 const log = require("./logger");
 const { CliBridge } = require("./cliBridge");
 
 const execFileAsync = promisify(execFile);
 const CLAUDE_CODE_OFFICIAL_URL = "https://code.claude.com/docs/en/getting-started";
-const CLAUDE_INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
+const CLAUDE_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 // The CLI launcher can be invoked repeatedly while the desktop process is
 // already starting. Keep one desktop process (and therefore one installer
@@ -31,8 +33,15 @@ let session = null; // { baseUrl, apiKey }
 let updateState = { status: "idle", message: "" };
 let claudeInstallState = { status: "idle", phase: "idle", percent: 0, message: "" };
 let claudeInstallPromise = null;
+let claudeInstallerLastOutputAt = 0;
+let claudeInstallerLastOutput = "";
 let mainWindow = null;
 const cliBridge = new CliBridge({ getWindow: () => mainWindow, log });
+const codexCli = createCodexCliService({
+  userDataPath: app.getPath("userData"),
+  log,
+  onInstallState: (state) => broadcast("cizi:codexCliInstallState", state),
+});
 
 function shouldBlockDevToolsShortcut(input) {
   const key = String(input.key || "").toLowerCase();
@@ -70,9 +79,10 @@ function createWindow() {
   });
   mainWindow = win;
   lockProductionWindow(win);
-  win.webContents.on("render-process-gone", () => cliBridge.markRendererUnavailable(win.webContents));
+  const cachedContents = win.webContents;
+  win.webContents.on("render-process-gone", () => cliBridge.markRendererUnavailable(cachedContents));
   win.on("closed", () => {
-    cliBridge.markRendererUnavailable(win.webContents);
+    cliBridge.markRendererUnavailable(cachedContents);
     if (mainWindow === win) mainWindow = null;
   });
   win.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
@@ -259,7 +269,143 @@ function appendClaudeInstallerOutput(operationId, buffer) {
   for (const line of lines) {
     const percentMatch = line.match(/(?:^|\s)(\d{1,3})%/);
     const percent = percentMatch ? Math.max(0, Math.min(100, Number(percentMatch[1]))) : null;
-    updateClaudeOperation(operationId, { detail: installerOutputLine(line), ...(percent == null ? {} : { percent }) });
+    const detail = installerOutputLine(line);
+    claudeInstallerLastOutputAt = Date.now();
+    claudeInstallerLastOutput = detail;
+    updateClaudeOperation(operationId, { detail, ...(percent == null ? {} : { percent }) });
+  }
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KB", "MB", "GB"];
+  let amount = bytes;
+  let index = -1;
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024;
+    index += 1;
+  }
+  return `${amount.toFixed(amount >= 100 ? 0 : amount >= 10 ? 1 : 2)} ${units[index]}`;
+}
+
+function formatElapsed(startedAt) {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes ? `${minutes}m ${String(remainder).padStart(2, "0")}s` : `${remainder}s`;
+}
+
+async function fetchClaudeNativeMetadata(isWindows) {
+  if (!isWindows) return null;
+  try {
+    const latestUrl = "https://downloads.claude.ai/claude-code-releases/latest";
+    const versionResponse = await fetch(assertHttpsUrl(latestUrl, "Claude Code release URL"), { cache: "no-store" });
+    if (!versionResponse.ok) return null;
+    const version = (await versionResponse.text()).trim();
+    if (!/^\d+\.\d+\.\d+/.test(version)) return null;
+    const manifestUrl = `https://downloads.claude.ai/claude-code-releases/${encodeURIComponent(version)}/manifest.json`;
+    const manifestResponse = await fetch(assertHttpsUrl(manifestUrl, "Claude Code release manifest URL"), { cache: "no-store" });
+    if (!manifestResponse.ok) return null;
+    const manifest = await manifestResponse.json();
+    const platform = manifest?.platforms?.["win32-x64"];
+    const size = Number(platform?.size);
+    return { version, size: Number.isFinite(size) && size > 0 ? size : null };
+  } catch {
+    // Metadata only improves progress reporting; the official script remains authoritative.
+    return null;
+  }
+}
+
+function latestClaudeNativeBinary(startedAt) {
+  const directory = path.join(os.homedir(), ".claude", "downloads");
+  try {
+    const files = fs.readdirSync(directory)
+      .filter((name) => /^claude-[^/]+\.(exe|bin)$/i.test(name))
+      .map((name) => {
+        const filePath = path.join(directory, name);
+        const stat = fs.statSync(filePath);
+        return { filePath, name, size: stat.size, mtimeMs: stat.mtimeMs };
+      })
+      .filter((entry) => entry.mtimeMs >= startedAt - 5000)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return files[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+function monitorClaudeInstaller(child, { startedAt, metadata }) {
+  let lastSize = -1;
+  let lastFileChangeAt = startedAt;
+  const update = () => {
+    if (!child || child.exitCode != null) return;
+    const launcherPath = process.platform === "win32"
+      ? path.join(os.homedir(), ".local", "bin", "claude.exe")
+      : path.join(os.homedir(), ".local", "bin", "claude");
+    const elapsed = formatElapsed(startedAt);
+    const aliveMark = child.pid ? `PID ${child.pid} alive ✓` : "alive ✓";
+    const launcherExists = fs.existsSync(launcherPath);
+    const binary = latestClaudeNativeBinary(startedAt);
+    let detail;
+    if (launcherExists && binary && metadata?.size && binary.size >= metadata.size) {
+      detail = `Launcher detected; verifying checksum and finishing setup — 1–2 dk sürebilir (${elapsed} elapsed, ${aliveMark}).`;
+      updateClaudeOperation("install", { detail, percent: 99 });
+      setClaudeInstallState({ percent: 99, message: `Finalizing installation (${elapsed}) — almost done...` }, { logState: false });
+      return;
+    } else if (launcherExists) {
+      detail = `Launcher detected; finishing setup (${elapsed} elapsed, ${aliveMark}).`;
+      updateClaudeOperation("install", { detail, percent: 99 });
+      setClaudeInstallState({ percent: 99, message: `Finalizing installation (${elapsed})...` }, { logState: false });
+      return;
+    } else if (binary) {
+      if (binary.size !== lastSize) lastFileChangeAt = Date.now();
+      lastSize = binary.size;
+      const percent = metadata?.size ? Math.min(99, Math.round((binary.size / metadata.size) * 100)) : null;
+      const quietFor = Math.max(0, Math.floor((Date.now() - lastFileChangeAt) / 1000));
+      if (quietFor >= 30 && metadata?.size && binary.size >= metadata.size * 0.97) {
+        detail = `İndirme %99'da tamamlandı — şimdi checksum doğrulanıyor & açılıyor (normal, 1–2 dk). Hâlâ çalışıyor ✓ (${elapsed} elapsed, ${formatBytes(binary.size)} / ${formatBytes(metadata.size)}, ${aliveMark}).`;
+        updateClaudeOperation("install", { detail, percent: 99 });
+        setClaudeInstallState({ percent: 99, message: `Verifying & extracting (${elapsed}) — still working, please wait...` }, { logState: false });
+        return;
+      } else {
+        const stage = binary.size === 0
+          ? "Official native binary download started"
+          : metadata?.size && binary.size >= metadata.size
+            ? "Official native binary downloaded; verifying checksum"
+            : "Downloading official native binary";
+        detail = metadata?.size
+          ? `${stage}: ${formatBytes(binary.size)} / ${formatBytes(metadata.size)} (${percent}%, ${elapsed} elapsed, ${aliveMark})${quietFor >= 30 ? `; no byte change for ${quietFor}s` : ""}.`
+          : `${stage}: ${formatBytes(binary.size)} (${elapsed} elapsed, ${aliveMark})${quietFor >= 30 ? `; no byte change for ${quietFor}s` : ""}.`;
+        const stepPercent = percent;
+        updateClaudeOperation("install", { detail, ...(stepPercent == null ? {} : { percent: stepPercent }) });
+        if (stepPercent != null) setClaudeInstallState({ percent: stepPercent, message: `Official installer is running (${elapsed}) — ${aliveMark}.` }, { logState: false });
+        return;
+      }
+    } else if (Date.now() - claudeInstallerLastOutputAt < 5000 && claudeInstallerLastOutput) {
+      detail = `${claudeInstallerLastOutput} (${elapsed} elapsed, ${aliveMark}).`;
+      updateClaudeOperation("install", { detail });
+    } else {
+      const quietFor = Math.max(0, Math.floor((Date.now() - lastFileChangeAt) / 1000));
+      detail = quietFor >= 30
+        ? `Official installer is still running ✓; no file/output change for ${quietFor}s. It may be verifying files or waiting on the network (${elapsed} elapsed, ${aliveMark}).`
+        : `Official installer process is running ✓; waiting for its next step (${elapsed} elapsed, ${aliveMark}).`;
+      updateClaudeOperation("install", { detail });
+    }
+    setClaudeInstallState({ message: `Official installer is running (${elapsed}) — ${aliveMark}.` }, { logState: false });
+  };
+  update();
+  const timer = setInterval(update, 1000);
+  return () => clearInterval(timer);
+}
+
+function terminateProcessTree(child) {
+  if (!child?.pid) return;
+  if (process.platform === "win32") {
+    execFile("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => {});
+  } else {
+    try { child.kill("SIGTERM"); } catch {}
   }
 }
 
@@ -300,21 +446,42 @@ function acquireClaudeInstallerLock() {
   return () => { try { fs.rmSync(lockPath, { force: true }); } catch {} };
 }
 
-function waitForInstaller(child) {
+function waitForInstaller(child, startedAt) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
+    const checkProgress = () => {
+      if (settled) return;
+      if (Date.now() - startedAt >= CLAUDE_INSTALL_TIMEOUT_MS) {
+        const launcherPath = process.platform === "win32"
+          ? path.join(os.homedir(), ".local", "bin", "claude.exe")
+          : path.join(os.homedir(), ".local", "bin", "claude");
+        const binary = latestClaudeNativeBinary(startedAt);
+        const launcherExists = fs.existsSync(launcherPath);
+        const nearDone = binary && launcherExists;
+        const stalledNearEnd = binary && (Date.now() - claudeInstallerLastOutputAt > 90000);
+        if (nearDone || stalledNearEnd) return;
+        settled = true;
+        terminateProcessTree(child);
+        const error = new Error("The official Claude Code installer timed out.");
+        error.userMessage = claudeInstallMessage(error);
+        reject(error);
+      }
+    };
+    const progressTimer = setInterval(checkProgress, 15000);
+    const hardTimer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      try { child.kill(); } catch {}
+      clearInterval(progressTimer);
+      terminateProcessTree(child);
       const error = new Error("The official Claude Code installer timed out.");
       error.userMessage = claudeInstallMessage(error);
       reject(error);
-    }, CLAUDE_INSTALL_TIMEOUT_MS);
+    }, CLAUDE_INSTALL_TIMEOUT_MS + 90 * 1000);
     const finish = (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(hardTimer);
+      clearInterval(progressTimer);
       if (error) reject(error);
       else resolve();
     };
@@ -351,17 +518,28 @@ async function installClaudeCodeCli() {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cizi-claude-install-"));
     const installerPath = path.join(tempDir, isWindows ? "install.ps1" : "install.sh");
     updateClaudeOperation("download", { label: "Download official installer", status: "running", percent: 0, detail: installerUrl }, { logState: true });
-    setClaudeInstallState({ status: "downloading", phase: "download", percent: 20, message: "Downloading the official Claude Code installer..." }, { logState: false });
+    setClaudeInstallState({ status: "downloading", phase: "download", percent: 0, message: "Downloading the official Claude Code installer..." }, { logState: false });
     const downloaded = await downloadClaudeInstaller(installerUrl, installerPath, ({ received, total, percent }) => {
       updateClaudeOperation("download", {
         percent,
         detail: total ? `${received} / ${total} bytes` : `${received} bytes downloaded`,
       });
+      setClaudeInstallState({ percent: percent ?? 0 }, { logState: false });
     });
     updateClaudeOperation("download", { status: "done", percent: 100, detail: `${downloaded.bytes} bytes downloaded.` }, { logState: false });
+    setClaudeInstallState({ percent: 100 }, { logState: false });
 
-    updateClaudeOperation("install", { label: "Run official installer", status: "running", percent: null, detail: "Waiting for installer output..." }, { logState: true });
-    setClaudeInstallState({ status: "installing", phase: "install", percent: 55, message: "Running the official Claude Code installer..." }, { logState: false });
+    updateClaudeOperation("install", { label: "Run official installer", status: "running", percent: 0, detail: "Preparing official release metadata..." }, { logState: true });
+    setClaudeInstallState({ status: "installing", phase: "install", percent: 0, message: "Running the official Claude Code installer..." }, { logState: false });
+    const nativeMetadata = await fetchClaudeNativeMetadata(isWindows);
+    updateClaudeOperation("install", {
+      detail: nativeMetadata?.size
+        ? `Official installer ready; expected native binary size is ${formatBytes(nativeMetadata.size)}.`
+        : "Official installer ready; waiting for native binary download or verification...",
+    }, { logState: false });
+    claudeInstallerLastOutputAt = 0;
+    claudeInstallerLastOutput = "";
+    const installerStartedAt = Date.now();
     const child = isWindows
       ? spawn("powershell.exe", [
         "-NoProfile",
@@ -382,11 +560,16 @@ async function installClaudeCodeCli() {
 
     child.stdout?.on("data", (chunk) => appendClaudeInstallerOutput("install", chunk));
     child.stderr?.on("data", (chunk) => appendClaudeInstallerOutput("install", chunk));
-    await waitForInstaller(child);
+    const stopInstallerMonitor = monitorClaudeInstaller(child, { startedAt: installerStartedAt, metadata: nativeMetadata });
+    try {
+      await waitForInstaller(child, installerStartedAt);
+    } finally {
+      stopInstallerMonitor();
+    }
     updateClaudeOperation("install", { status: "done", percent: 100, detail: "Official installer finished." }, { logState: false });
 
     updateClaudeOperation("verify", { label: "Verify Claude Code CLI", status: "running", percent: 0, detail: "Running claude --version..." }, { logState: true });
-    setClaudeInstallState({ status: "verifying", phase: "verify", percent: 85, message: "Verifying the Claude Code CLI installation..." }, { logState: false });
+    setClaudeInstallState({ status: "verifying", phase: "verify", percent: 0, message: "Verifying the Claude Code CLI installation..." }, { logState: false });
     const after = await detectClaudeCodeCli();
     if (!after.installed) throw new Error("Installer finished, but Claude Code CLI could not be detected yet.");
     updateClaudeOperation("verify", { status: "done", percent: 100, detail: after.version || after.command || "Detected" }, { logState: false });
@@ -405,6 +588,34 @@ async function installClaudeCodeCli() {
     claudeInstallPromise = null;
   });
   return claudeInstallPromise;
+}
+
+async function openClaudeCodeCli() {
+  const status = await detectClaudeCodeCli();
+  if (!status.installed || !status.command) throw new Error("Claude Code CLI is not installed on this computer.");
+  const command = String(status.command);
+  const isExe = /\.exe$/i.test(command) && fs.existsSync(command);
+  log.info("claude-code-cli", `Open Claude Code CLI: ${command}`, { installed: true });
+  if (process.platform === "win32") {
+    let shellCommand;
+    let shellArgs;
+    if (isExe) {
+      shellCommand = "cmd.exe";
+      shellArgs = ["/c", "start", '""', command];
+    } else {
+      const run = /\.(cmd|bat)$/i.test(command) ? `"${command.replace(/"/g, '""')}"` : command;
+      shellCommand = process.env.ComSpec || "cmd.exe";
+      shellArgs = ["/d", "/s", "/c", `start "" ${run}`];
+    }
+    const child = spawn(shellCommand, shellArgs, { cwd: os.homedir(), detached: true, stdio: "ignore", windowsHide: false });
+    child.unref();
+  } else {
+    const terminal = process.env.TERM_PROGRAM || "xterm";
+    const child = spawn(command, [], { cwd: os.homedir(), detached: true, stdio: "ignore" });
+    child.unref();
+    void terminal;
+  }
+  return { opened: true, command };
 }
 
 function assertHttpsUrl(value, label) {
@@ -468,7 +679,9 @@ if (hasSingleInstanceLock) {
   app.on("second-instance", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
     mainWindow.focus();
+    log.info("app", "Cizi Code existing instance was brought to foreground");
   });
 
   app.whenReady().then(() => {
@@ -567,9 +780,20 @@ ipcMain.handle("cizi:getTemplates", wrap("getTemplates", async () => {
 
 ipcMain.handle("cizi:getClaudeCodeStatus", wrap("getClaudeCodeStatus", async () => detectClaudeCodeCli()));
 ipcMain.handle("cizi:installClaudeCode", wrap("installClaudeCode", async () => installClaudeCodeCli()));
+ipcMain.handle("cizi:openClaudeCodeCli", wrap("openClaudeCodeCli", async () => openClaudeCodeCli()));
+ipcMain.handle("cizi:planClaudeCodeUninstall", wrap("planClaudeCodeUninstall", async () => ({ plan: claudeUninstall.planClaudeCodeUninstall(), existing: claudeUninstall.describeExisting(claudeUninstall.planClaudeCodeUninstall()) })));
+ipcMain.handle("cizi:uninstallClaudeCode", wrap("uninstallClaudeCode", async () => claudeUninstall.uninstallClaudeCode({ log })));
 ipcMain.handle("cizi:openClaudeCodeSite", wrap("openClaudeCodeSite", async () => {
   await shell.openExternal(CLAUDE_CODE_OFFICIAL_URL);
   return { opened: true, url: CLAUDE_CODE_OFFICIAL_URL };
+}));
+ipcMain.handle("cizi:getCodexCliStatus", wrap("getCodexCliStatus", async () => codexCli.detect()));
+ipcMain.handle("cizi:installCodexCli", wrap("installCodexCli", async () => codexCli.install()));
+ipcMain.handle("cizi:openCodexCli", wrap("openCodexCli", async ({ model, useCiziProfile } = {}) => codexCli.open({ model, useCiziProfile })));
+ipcMain.handle("cizi:uninstallCodexCli", wrap("uninstallCodexCli", async () => codexCli.uninstall()));
+ipcMain.handle("cizi:openCodexCliSite", wrap("openCodexCliSite", async () => {
+  await shell.openExternal(codexCli.officialSiteUrl);
+  return { opened: true, url: codexCli.officialSiteUrl };
 }));
 
 ipcMain.handle("cizi:listTools", wrap("listTools", async () => toolMgr.listToolStatuses(api.TOOL_BASE_URL)));

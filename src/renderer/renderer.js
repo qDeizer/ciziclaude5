@@ -8,12 +8,17 @@ var cizi = window.cizi;
 var TEMPLATES = null;
 var CLAUDE_CLI_STATUS = { installed: false, command: null, version: null };
 var CLAUDE_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
+var CODEX_CLI_STATUS = { installed: false, command: null, version: null };
+var CODEX_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
+var CODEX_SELECTED_MODEL = "gpt-5.6-luna";
 var ME = null;
 var LOG_TIMER = null;
 var LAST_USAGE_REFRESH = null;
 const CLAUDE_CODE_CLI_TOOL_ID = "claude-code";
 const CLAUDE_CODE_CLI_NAME = "Claude Code CLI";
-var FIRST_RELEASE_TOOLS = [CLAUDE_CODE_CLI_TOOL_ID];
+const CODEX_CLI_TOOL_ID = "codex";
+const CODEX_CLI_NAME = "Codex CLI";
+var FIRST_RELEASE_TOOLS = [CLAUDE_CODE_CLI_TOOL_ID, CODEX_CLI_TOOL_ID];
 
 function clog(level, msg, meta) {
   try {
@@ -253,8 +258,9 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 async function loadTemplatesAndTools() {
-  const [toolsRes, claudeRes] = await Promise.all([cizi.listTools(), cizi.getClaudeCodeStatus()]);
+  const [toolsRes, claudeRes, codexRes] = await Promise.all([cizi.listTools(), cizi.getClaudeCodeStatus(), cizi.getCodexCliStatus()]);
   CLAUDE_CLI_STATUS = claudeRes?.ok ? (claudeRes.data || { installed: false }) : { installed: false };
+  CODEX_CLI_STATUS = codexRes?.ok ? (codexRes.data || { installed: false }) : { installed: false };
   TEMPLATES = buildDefaultTemplates();
   renderTools(toolsRes.ok ? toolsRes.data : []);
 }
@@ -265,17 +271,24 @@ function buildDefaultTemplates() {
   return {
     combos,
     defaultCombo: names.includes("Opus-4.8") ? "Opus-4.8" : names[0],
-    tools: [{ id: CLAUDE_CODE_CLI_TOOL_ID, enabled: true }],
+    tools: [{ id: CLAUDE_CODE_CLI_TOOL_ID, enabled: true }, { id: CODEX_CLI_TOOL_ID, enabled: true }],
   };
 }
 
 function updateClaudeInstallFeedback(state) {
   CLAUDE_INSTALL_STATE = { ...CLAUDE_INSTALL_STATE, ...(state || {}) };
-  renderClaudeInstallActivity(CLAUDE_INSTALL_STATE);
+  renderCliInstallActivity(CLAUDE_INSTALL_STATE, "claude");
 }
 
-function renderClaudeInstallActivity(state) {
-  const box = document.getElementById("claude-cli-install-activity");
+function updateCodexInstallFeedback(state) {
+  CODEX_INSTALL_STATE = { ...CODEX_INSTALL_STATE, ...(state || {}) };
+  renderCliInstallActivity(CODEX_INSTALL_STATE, "codex");
+}
+
+function renderCliInstallActivity(state, cli) {
+  const isCodex = cli === "codex";
+  const cliName = isCodex ? CODEX_CLI_NAME : CLAUDE_CODE_CLI_NAME;
+  const box = document.getElementById(isCodex ? "codex-cli-install-activity" : "claude-cli-install-activity");
   if (!box) return;
   const operations = Array.isArray(state?.operations) ? state.operations : [];
   const visible = operations.length > 0 && state?.status !== "idle";
@@ -286,56 +299,82 @@ function renderClaudeInstallActivity(state) {
   const header = document.createElement("div");
   header.className = "cli-activity-head";
   const title = document.createElement("strong");
-  title.textContent = "Claude Code CLI installation activity";
+  title.textContent = `${cliName} installation activity`;
   const overall = document.createElement("span");
   overall.className = "cli-activity-overall";
-  overall.textContent = state?.percent != null && Number.isFinite(Number(state.percent)) ? `${Math.round(Number(state.percent))}%` : "...";
+  const overallPercent = Number(state?.percent);
+  const hasOverallPercent = state?.percent != null && Number.isFinite(overallPercent) && (overallPercent > 0 || state?.status === "installed");
+  overall.textContent = hasOverallPercent ? `${Math.round(overallPercent)}%` : "...";
+  const pulse = document.createElement("span");
+  pulse.className = `cli-activity-pulse ${["installing", "downloading", "verifying", "checking"].includes(state?.status) || (state?.percent >= 0 && state?.percent < 100) ? "" : "hidden"}`;
+  pulse.textContent = "● live";
+  pulse.title = "Installer is still running";
   header.appendChild(title);
   header.appendChild(overall);
+  header.appendChild(pulse);
   box.appendChild(header);
 
   const message = document.createElement("div");
   message.className = "cli-activity-message";
   message.textContent = state?.message || "Working...";
   box.appendChild(message);
-
-  const list = document.createElement("div");
-  list.className = "cli-operation-list";
-  for (const operation of operations) {
-    const row = document.createElement("div");
-    row.className = `cli-operation cli-operation-${operation.status || "pending"}`;
-
-    const rowHead = document.createElement("div");
-    rowHead.className = "cli-operation-head";
-    const label = document.createElement("span");
-    label.className = "cli-operation-label";
-    label.textContent = operation.label || operation.id || "Operation";
-    const percent = document.createElement("span");
-    percent.className = "cli-operation-percent";
-    const hasPercent = operation.percent != null && Number.isFinite(Number(operation.percent));
-    percent.textContent = hasPercent
-      ? `${Math.round(Number(operation.percent))}%`
-      : operation.status === "done" ? "100%" : "...";
-    rowHead.appendChild(label);
-    rowHead.appendChild(percent);
-    row.appendChild(rowHead);
-
-    const track = document.createElement("div");
-    track.className = "cli-operation-track";
-    const fill = document.createElement("span");
-    fill.className = "cli-operation-fill";
-    if (hasPercent) fill.style.width = `${Math.max(0, Math.min(100, Number(operation.percent)))}%`;
-    else fill.classList.add("indeterminate");
-    track.appendChild(fill);
-    row.appendChild(track);
-
-    const detail = document.createElement("div");
-    detail.className = "cli-operation-detail";
-    detail.textContent = operation.detail || (operation.status === "done" ? "Completed" : "Waiting...");
-    row.appendChild(detail);
-    list.appendChild(row);
+  const hint = document.createElement("div");
+  hint.className = "cli-activity-hint";
+  if ((state?.status === "installing" || state?.phase === "install") && state?.percent >= 90) {
+    hint.textContent = "Bu aşama 1–2 dk sürebilir — pencereyi kapatmayın, işlem arka planda sürüyor.";
+  } else if (state?.status === "error") {
+    hint.textContent = "";
+  } else if (["installing", "downloading", "verifying"].includes(state?.status)) {
+    hint.textContent = "Arka planda çalışıyor — lütfen bekleyin.";
+  } else {
+    hint.textContent = "";
   }
-  box.appendChild(list);
+  if (hint.textContent) box.appendChild(hint);
+
+  const rawActive = [...operations].find((o) => o.status === "running") || operations[operations.length - 1];
+  const stepPercent = Number(rawActive?.percent);
+  // A zero emitted by a third-party installer is not download progress.  It is
+  // shown as indeterminate until a measurable byte/step percentage is known.
+  const hasStepPercent = rawActive?.percent != null && Number.isFinite(stepPercent) && (stepPercent > 0 || rawActive?.status === "done");
+  const statusClass = state?.status === "error" ? "cli-operation-error" : state?.status === "installed" ? "cli-operation-done" : "";
+  const stepLabel = rawActive?.label || (state?.phase === "download" ? "Download official installer" : state?.phase === "install" ? "Run official installer" : state?.phase === "verify" ? `Verify ${cliName}` : `${cliName} installation`);
+  const detailText = (rawActive?.detail || state?.message || "Working...").trim();
+
+  const single = document.createElement("div");
+  single.className = `cli-operation ${statusClass}`.trim();
+
+  const stepRow = document.createElement("div");
+  stepRow.className = "cli-step";
+  stepRow.textContent = stepLabel;
+  single.appendChild(stepRow);
+
+  const rowHead = document.createElement("div");
+  rowHead.className = "cli-operation-head";
+  const label = document.createElement("span");
+  label.className = "cli-operation-label";
+  label.textContent = hasStepPercent ? "Step progress" : "Installation status";
+  const percent = document.createElement("span");
+  percent.className = "cli-operation-percent";
+  percent.textContent = hasStepPercent ? `${Math.round(stepPercent)}%` : (state?.status === "error" ? "—" : "...");
+  rowHead.appendChild(label);
+  rowHead.appendChild(percent);
+  single.appendChild(rowHead);
+
+  const track = document.createElement("div");
+  track.className = "cli-operation-track";
+  const fill = document.createElement("span");
+  fill.className = "cli-operation-fill";
+  if (state?.status === "error") fill.classList.add("cli-operation-fill-error");
+  if (hasStepPercent) fill.style.width = `${Math.max(0, Math.min(100, stepPercent))}%`;
+  else fill.classList.add("indeterminate");
+  track.appendChild(fill);
+  single.appendChild(track);
+
+  const detail = document.createElement("div");
+  detail.className = "cli-operation-detail";
+  detail.textContent = detailText;
+  single.appendChild(detail);
+  box.appendChild(single);
 }
 
 function renderClaudeInstallActions(row, info) {
@@ -351,7 +390,7 @@ function renderClaudeInstallActions(row, info) {
   install.dataset.cliId = "claude-code-cli.install";
   install.dataset.cliLabel = "Install Claude Code CLI";
   install.dataset.cliAwait = "long";
-  install.dataset.cliAwaitTimeout = String(5 * 60 * 1000);
+  install.dataset.cliAwaitTimeout = String(10 * 60 * 1000);
   install.textContent = "Download & Install";
 
   const site = document.createElement("button");
@@ -376,6 +415,9 @@ function renderClaudeInstallActions(row, info) {
       updateClaudeInstallFeedback({ status: "installed", percent: 100, message: "Claude Code CLI is installed." });
       toast("Claude Code CLI installed.", "good");
       await loadTemplatesAndTools();
+      setTimeout(() => {
+        updateClaudeInstallFeedback({ status: "idle", percent: 0, message: "", operations: [] });
+      }, 2500);
     } else {
       install.disabled = false;
       site.disabled = false;
@@ -394,6 +436,62 @@ function renderClaudeInstallActions(row, info) {
   actions.appendChild(buttons);
   row.appendChild(info);
   row.appendChild(actions);
+}
+
+function renderCodexInstallActions(row, info) {
+  const actions = document.createElement("div");
+  actions.className = "tool-actions tool-install-actions";
+  const buttons = document.createElement("div");
+  buttons.className = "tool-actions-buttons";
+  const install = document.createElement("button");
+  install.type = "button";
+  install.className = "primary tiny-btn";
+  install.dataset.cliId = "codex-cli.install";
+  install.dataset.cliLabel = "Install Codex CLI";
+  install.dataset.cliAwait = "long";
+  install.dataset.cliAwaitTimeout = String(10 * 60 * 1000);
+  install.textContent = "İndir ve Kur";
+  const site = document.createElement("button");
+  site.type = "button";
+  site.className = "ghost tiny-btn";
+  site.dataset.cliId = "codex-cli.official-site";
+  site.dataset.cliLabel = "Open official Codex CLI site";
+  site.textContent = "Resmi indirme sitesi";
+  install.addEventListener("click", async () => {
+    install.disabled = true;
+    site.disabled = true;
+    install.textContent = "Kuruluyor...";
+    updateCodexInstallFeedback({ status: "starting", percent: 0, message: "Resmî Codex yükleyicisi başlatılıyor..." });
+    let res;
+    try { res = await cizi.installCodexCli(); } catch (error) { res = { ok: false, error: error?.message || "Codex CLI kurulamadı." }; }
+    if (res.ok && res.data?.installed) {
+      CODEX_CLI_STATUS = res.data;
+      updateCodexInstallFeedback({ status: "installed", percent: 100, message: "Codex CLI kuruldu." });
+      toast("Codex CLI kuruldu.", "good");
+      await loadTemplatesAndTools();
+      setTimeout(() => updateCodexInstallFeedback({ status: "idle", percent: 0, message: "", operations: [] }), 2500);
+    } else {
+      install.disabled = false;
+      site.disabled = false;
+      install.textContent = "İndir ve Kur";
+      updateCodexInstallFeedback({ status: "error", message: res.error || "Codex CLI kurulamadı." });
+      toast(clientMessage(res.error || "Codex CLI kurulamadı."), "bad");
+    }
+  });
+  site.addEventListener("click", async () => {
+    const res = await cizi.openCodexCliSite();
+    if (!res.ok) toast(clientMessage(res.error || "Resmî indirme sitesi açılamadı."), "bad");
+  });
+  buttons.appendChild(install);
+  buttons.appendChild(site);
+  actions.appendChild(buttons);
+  row.appendChild(info);
+  row.appendChild(actions);
+}
+
+function codexModelIds(models) {
+  const names = (models || []).map((m) => typeof m === "string" ? m : m?.name).filter(Boolean);
+  return [...new Set(["gpt-5.6-luna", "gpt-5.6-terra", ...names])];
 }
 
 function renderTools(statuses) {
@@ -418,7 +516,7 @@ function renderTools(statuses) {
   if (!offered.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = `${CLAUDE_CODE_CLI_NAME} is not available for this key.`;
+    empty.textContent = "No command-line tool is available for this key.";
     list.appendChild(empty);
     return;
   }
@@ -438,11 +536,15 @@ function renderTools(statuses) {
 
     const sub = document.createElement("div");
     sub.className = "tool-sub";
+    const managedCliName = st.id === CODEX_CLI_TOOL_ID ? CODEX_CLI_NAME : CLAUDE_CODE_CLI_NAME;
+    const managedCliStatus = st.id === CODEX_CLI_TOOL_ID ? CODEX_CLI_STATUS : st.id === CLAUDE_CODE_CLI_TOOL_ID ? CLAUDE_CLI_STATUS : null;
     sub.textContent = st.applied
-      ? `${CLAUDE_CODE_CLI_NAME} is connected to Cizi Code`
+      ? `${managedCliName} is connected to Cizi Code`
+      : managedCliStatus?.installed
+        ? `Kurulu: ${managedCliStatus.version || managedCliStatus.command || managedCliName}`
       : st.hasBackup
         ? "Turn on to reconnect, or leave off to keep your previous settings"
-        : `Turn on to prepare ${CLAUDE_CODE_CLI_NAME} automatically`;
+        : `Turn on to prepare ${managedCliName} automatically`;
 
     info.appendChild(name);
     info.appendChild(sub);
@@ -453,12 +555,34 @@ function renderTools(statuses) {
       list.appendChild(row);
       continue;
     }
-
+    if (st.id === CODEX_CLI_TOOL_ID && !CODEX_CLI_STATUS.installed) {
+      sub.textContent = CODEX_CLI_STATUS.message || `${CODEX_CLI_NAME} is not installed on this computer.`;
+      renderCodexInstallActions(row, info);
+      list.appendChild(row);
+      continue;
+    }
+    const actions = document.createElement("div");
+    actions.className = "tool-actions";
+    if (st.id === CODEX_CLI_TOOL_ID) {
+      const modelSelect = document.createElement("select");
+      modelSelect.className = "tool-model";
+      modelSelect.dataset.cliId = "tool.codex-cli.model";
+      modelSelect.dataset.cliLabel = "Codex model";
+      for (const modelId of codexModelIds(models)) {
+        const option = document.createElement("option");
+        option.value = modelId;
+        option.textContent = modelId;
+        option.selected = modelId === CODEX_SELECTED_MODEL;
+        modelSelect.appendChild(option);
+      }
+      modelSelect.addEventListener("change", () => { CODEX_SELECTED_MODEL = modelSelect.value; });
+      actions.appendChild(modelSelect);
+    }
     const sw = document.createElement("label");
     sw.className = "switch";
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    const cliToolId = st.id === CLAUDE_CODE_CLI_TOOL_ID ? "claude-code-cli" : st.id;
+    const cliToolId = st.id === CLAUDE_CODE_CLI_TOOL_ID ? "claude-code-cli" : st.id === CODEX_CLI_TOOL_ID ? "codex-cli" : st.id;
     cb.dataset.cliId = `tool.${cliToolId}.switch`;
     cb.dataset.cliLabel = `${st.name} connection`;
     cb.checked = !!st.applied;
@@ -467,19 +591,120 @@ function renderTools(statuses) {
     slider.className = "slider";
     sw.appendChild(cb);
     sw.appendChild(slider);
+    actions.appendChild(sw);
+    if (st.id === CODEX_CLI_TOOL_ID && CODEX_CLI_STATUS.installed) {
+      const openBtn = document.createElement("button");
+      openBtn.type = "button";
+      openBtn.className = "ghost tiny-btn";
+      openBtn.dataset.cliId = "codex-cli.open";
+      openBtn.dataset.cliLabel = "Open Codex CLI";
+      openBtn.textContent = "Aç";
+      openBtn.title = st.applied ? "Codex'i Cizi Code profiliyle aç" : "Önce Cizi Code bağlantısını açın";
+      openBtn.title = st.applied ? "Open Codex CLI with the Cizi Code profile" : "Open Codex CLI with its default settings";
+      openBtn.addEventListener("click", async () => {
+        openBtn.disabled = true;
+        const res = await cizi.openCodexCli(CODEX_SELECTED_MODEL, !!st.applied);
+        if (res.ok && !st.applied) {
+          toast("Codex CLI opened with default settings.", "good");
+          openBtn.disabled = false;
+          return;
+        }
+        if (res.ok) toast("Codex CLI Cizi Code profiliyle başlatıldı.", "good");
+        else toast(clientMessage(res.error || "Codex CLI başlatılamadı."), "bad");
+        openBtn.disabled = false;
+      });
+      actions.appendChild(openBtn);
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "ghost tiny-btn danger";
+      removeBtn.dataset.cliId = "codex-cli.purge";
+      removeBtn.dataset.cliLabel = "Kökten Kaldır Codex CLI";
+      removeBtn.textContent = "Kökten Kaldır";
+      removeBtn.title = "Yalnızca bağımsız Codex CLI kurulumunu ve Cizi Code profilini kaldırır";
+      removeBtn.addEventListener("click", async () => {
+        if (!confirm("Bağımsız Codex CLI ve Cizi Code profili kaldırılacak. Codex Desktop ve ChatGPT korunur. Devam edilsin mi?")) return;
+        removeBtn.disabled = true;
+        openBtn.disabled = true;
+        removeBtn.textContent = "Kaldırılıyor...";
+        clog("info", "Codex CLI kökten kaldırılıyor");
+        const res = await cizi.uninstallCodexCli();
+        if (res.ok) {
+          toast("Codex CLI kaldırıldı; masaüstü uygulamaları korunuyor.", "good");
+          clog("success", "Codex CLI kökten kaldırıldı");
+        } else {
+          toast(clientMessage(res.error || "Kökten kaldırma kısmen tamamlandı."), "bad");
+          clog("warning", "Codex CLI kökten kaldırma kısmen tamamlandı");
+        }
+        await loadTemplatesAndTools();
+      });
+      actions.appendChild(removeBtn);
+    }
+    if (st.id === CLAUDE_CODE_CLI_TOOL_ID && CLAUDE_CLI_STATUS.installed) {
+      const openBtn = document.createElement("button");
+      openBtn.type = "button";
+      openBtn.className = "ghost tiny-btn";
+      openBtn.dataset.cliId = "claude-code-cli.open";
+      openBtn.dataset.cliLabel = "Open Claude Code CLI";
+      openBtn.textContent = "Aç";
+      openBtn.addEventListener("click", async () => {
+        openBtn.disabled = true;
+        const res = await cizi.openClaudeCodeCli();
+        if (res.ok) toast("Claude Code CLI başlatıldı.", "good");
+        else toast(clientMessage(res.error || "Claude Code CLI başlatılamadı."), "bad");
+        openBtn.disabled = false;
+      });
+      actions.appendChild(openBtn);
 
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "ghost tiny-btn danger";
+      removeBtn.dataset.cliId = "claude-code-cli.purge";
+      removeBtn.dataset.cliLabel = "Kökten Kaldır Claude Code CLI";
+      removeBtn.textContent = "Kökten Kaldır";
+      removeBtn.title = "Claude Code CLI izlerini kökten siler";
+      removeBtn.addEventListener("click", async () => {
+        if (!confirm("Claude Code CLI kökten kaldırılacak. Devam edilsin mi?")) return;
+        removeBtn.disabled = true;
+        openBtn.disabled = true;
+        removeBtn.textContent = "Kaldırılıyor...";
+        clog("info", "Claude Code CLI kökten kaldırılıyor");
+        const res = await cizi.uninstallClaudeCode();
+        if (res.ok) {
+          const n = res.data?.removed?.length || 0;
+          const still = res.data?.stillExists?.length || 0;
+          if (still > 0) {
+            toast(`Kaldırıldı (${n} öğe) ama ${still} iz kaldı — yeniden deneyin.`, "bad");
+            clog("warn", `Kökten kaldırma kısmen tamamlandı: ${still} iz kaldı`);
+          } else {
+            toast(`Claude Code CLI kaldırıldı (${n} öğe).`, "good");
+            clog("success", `Claude Code CLI kökten kaldırıldı (${n} öğe)`);
+          }
+        } else {
+          toast(clientMessage(res.error || "Kökten kaldırma başarısız."), "bad");
+          clog("error", clientMessage(res.error || "Kökten kaldırma başarısız."));
+        }
+        removeBtn.disabled = false;
+        openBtn.disabled = false;
+        removeBtn.textContent = "Kökten Kaldır";
+        await loadTemplatesAndTools();
+      });
+      actions.appendChild(removeBtn);
+    }
     cb.addEventListener("change", async () => {
       cb.disabled = true;
       clog("info", `${st.name}: ${cb.checked ? "connect" : "restore"}`, { tool: st.id });
       if (cb.checked) {
-        if (!defaultModel) {
+        if (st.id !== CODEX_CLI_TOOL_ID && !defaultModel) {
           toast("No model is available for this key.", "bad");
           cb.checked = false;
           cb.disabled = false;
           return;
         }
-        const modelNames = models.map((m) => (typeof m === "string" ? m : m.name)).filter(Boolean);
-        const res = await cizi.applyTool(st.id, { model: defaultModel, models: modelNames });
+        const modelNames = st.id === CODEX_CLI_TOOL_ID
+          ? codexModelIds(models)
+          : models.map((m) => (typeof m === "string" ? m : m.name)).filter(Boolean);
+        const selectedModel = st.id === CODEX_CLI_TOOL_ID ? CODEX_SELECTED_MODEL : defaultModel;
+        const res = await cizi.applyTool(st.id, { model: selectedModel, models: modelNames });
         if (res.ok) toast(`${st.name} connected.`, "good");
         else {
           toast(clientMessage(res.error || "Could not connect this tool."), "bad");
@@ -502,7 +727,7 @@ function renderTools(statuses) {
     });
 
     row.appendChild(info);
-    row.appendChild(sw);
+    row.appendChild(actions);
     list.appendChild(row);
   }
 
@@ -638,6 +863,7 @@ $("update-install").addEventListener("click", async () => {
 });
 cizi.onUpdateState(renderUpdateState);
 if (cizi.onClaudeCodeInstallState) cizi.onClaudeCodeInstallState(updateClaudeInstallFeedback);
+if (cizi.onCodexCliInstallState) cizi.onCodexCliInstallState(updateCodexInstallFeedback);
 if (window.ciziCliUi?.handle && cizi.onCliRequest && cizi.cliReady) {
   cizi.onCliRequest((request) => window.ciziCliUi.handle(request));
   cizi.cliReady();
