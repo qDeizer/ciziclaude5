@@ -22,14 +22,31 @@ contextBridge.exposeInMainWorld("cizi", {
   },
   getCodexCliStatus: () => ipcRenderer.invoke("cizi:getCodexCliStatus"),
   installCodexCli: () => ipcRenderer.invoke("cizi:installCodexCli"),
-  openCodexCli: (model, useCiziProfile) => ipcRenderer.invoke("cizi:openCodexCli", { model, useCiziProfile }),
-  uninstallCodexCli: () => ipcRenderer.invoke("cizi:uninstallCodexCli"),
+  openCodexCli: (model, useCizi) => ipcRenderer.invoke("cizi:openCodexCli", { model, useCizi }),
+  planCodexCliUninstall: () => ipcRenderer.invoke("cizi:planCodexCliUninstall"),
+  uninstallCodexCli: (removeShared) => ipcRenderer.invoke("cizi:uninstallCodexCli", { removeShared }),
   openCodexCliSite: () => ipcRenderer.invoke("cizi:openCodexCliSite"),
   onCodexCliInstallState: (callback) => {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on("cizi:codexCliInstallState", listener);
     return () => ipcRenderer.removeListener("cizi:codexCliInstallState", listener);
   },
+
+  getCodexDesktopStatus: () => ipcRenderer.invoke("cizi:getCodexDesktopStatus"),
+  installCodexDesktop: () => ipcRenderer.invoke("cizi:installCodexDesktop"),
+  openCodexDesktop: () => ipcRenderer.invoke("cizi:openCodexDesktop"),
+  restartCodexDesktop: () => ipcRenderer.invoke("cizi:restartCodexDesktop"),
+  planCodexDesktopUninstall: () => ipcRenderer.invoke("cizi:planCodexDesktopUninstall"),
+  uninstallCodexDesktop: (removeShared) => ipcRenderer.invoke("cizi:uninstallCodexDesktop", { removeShared }),
+  openCodexDesktopStore: () => ipcRenderer.invoke("cizi:openCodexDesktopStore"),
+  onCodexDesktopInstallState: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("cizi:codexDesktopInstallState", listener);
+    return () => ipcRenderer.removeListener("cizi:codexDesktopInstallState", listener);
+  },
+
+  getCodexState: () => ipcRenderer.invoke("cizi:getCodexState"),
+  setCodexModel: (model) => ipcRenderer.invoke("cizi:setCodexModel", { model }),
   listTools: () => ipcRenderer.invoke("cizi:listTools"),
   applyTool: (toolId, modelSlots) => ipcRenderer.invoke("cizi:applyTool", { toolId, modelSlots }),
   revertTool: (toolId) => ipcRenderer.invoke("cizi:revertTool", { toolId }),

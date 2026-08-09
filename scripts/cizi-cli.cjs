@@ -53,6 +53,10 @@ function usage() {
         "cizi-cli list",
         "cizi-cli click login-btn",
         "cizi-cli switch tool.claude-code-cli.switch on",
+        "cizi-cli switch tool.codex.switch on",
+        "cizi-cli select tool.codex.model gpt-5.6-terra",
+        "cizi-cli click codex-desktop.install",
+        "cizi-cli click codex-desktop.purge",
         "cizi-cli select period-select 7d",
       ],
       guarantee: "Mutating commands resolve and trigger the renderer UI control; they do not call application services directly.",
@@ -86,7 +90,14 @@ function request(state, payload) {
       if (error) reject(error);
       else resolve(result);
     };
-    const timeoutMs = payload?.type === "click" && ["claude-code-cli.install", "codex-cli.install"].includes(payload?.id)
+    // Installs and root removals run an official third-party installer or the
+    // Windows package manager, so they get the long timeout.
+    const LONG_ACTIONS = [
+      "claude-code-cli.install", "claude-code-cli.purge",
+      "codex-cli.install", "codex-cli.purge",
+      "codex-desktop.install", "codex-desktop.purge",
+    ];
+    const timeoutMs = payload?.type === "click" && LONG_ACTIONS.includes(payload?.id)
       ? LONG_ACTION_TIMEOUT_MS
       : CONNECT_TIMEOUT_MS;
     socket.setTimeout(timeoutMs, () => finish(new Error("Cizi Code CLI bridge timed out.")));

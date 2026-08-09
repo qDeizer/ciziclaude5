@@ -3,6 +3,8 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { promisify } = require("util");
+const codexPaths = require("./codexPaths");
+const codexConfig = require("./codexConfigFile");
 
 const execFileAsync = promisify(execFile);
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -59,6 +61,8 @@ function standalonePaths() {
     programDir,
     programBin: path.join(programDir, "bin", "codex.exe"),
     standaloneDir: path.join(home, ".codex", "packages", "standalone"),
+    // Legacy CLI-only profile from earlier builds. Kept here so it can be
+    // cleaned up; the Cizi Code provider now lives in the shared config.toml.
     profile: path.join(home, ".codex", "cizicode.config.toml"),
   };
 }
@@ -177,28 +181,44 @@ async function closeStandaloneProcesses(programBin, log) {
   }
 }
 
-function removeLegacyCiziBlock() {
-  const config = path.join(standalonePaths().home, ".codex", "config.toml");
+// Removes the Cizi Code provider from the shared config. Only ever called when
+// no other Codex product is left to use it; while ChatGPT Desktop is installed
+// the shared config belongs to it too and is left alone.
+function removeSharedCiziConfig() {
   try {
-    if (!fs.existsSync(config)) return { changed: false, reason: "not-found" };
-    const original = fs.readFileSync(config, "utf8");
-    let next = original.replace(/^\s*model_provider\s*=\s*["']cizicode["']\s*\r?\n/gmi, "");
-    next = next.replace(/^\[model_providers\.cizicode\][\s\S]*?(?=^\[|(?![\s\S]))/gmi, "");
-    if (next === original) return { changed: false, reason: "not-present" };
-    fs.writeFileSync(config, next.replace(/\n{3,}/g, "\n\n"), "utf8");
-    return { changed: true, path: config };
+    const state = codexConfig.readState();
+    if (!state.exists) return { changed: false, reason: "not-found" };
+    if (!state.hasProvider && state.modelProvider !== codexConfig.PROVIDER_ID) {
+      return { changed: false, reason: "not-present" };
+    }
+    return codexConfig.revertCizi({});
   } catch (error) {
     return { changed: false, error: String(error?.message || error).slice(0, 300) };
   }
 }
 
-async function uninstallCodexCli({ log } = {}) {
-  const paths = standalonePaths();
+// `desktopInstalled` decides what may be touched: paths under ~/.codex that
+// belong only to the CLI are always fair game, but the shared root and the
+// shared config are protected whenever ChatGPT Desktop is still installed.
+async function uninstallCodexCli({ log, desktopInstalled, removeShared = false } = {}) {
+  const cliPaths = standalonePaths();
+  const keepShared = desktopInstalled !== false;
+  const clearShared = !keepShared && removeShared === true;
   const before = await detectCodexCli();
-  const closedProcesses = await closeStandaloneProcesses(paths.programBin, log);
-  const results = [removePath(paths.standaloneDir), removePath(paths.programDir), removePath(paths.profile)];
-  const pathResult = removeUserPathEntry(path.dirname(paths.programBin));
-  const legacyConfig = removeLegacyCiziBlock();
+  const closedProcesses = await closeStandaloneProcesses(cliPaths.programBin, log);
+
+  const targets = [cliPaths.standaloneDir, cliPaths.programDir, cliPaths.profile];
+  const results = targets.map(removePath);
+  const pathResult = removeUserPathEntry(path.dirname(cliPaths.programBin));
+
+  // With Desktop still installed the shared config is its config too.
+  const sharedConfig = keepShared
+    ? { changed: false, reason: "desktop-installed" }
+    : removeSharedCiziConfig();
+
+  const sharedRoot = codexPaths.sharedPaths().root;
+  const sharedRemoval = clearShared ? removePath(sharedRoot) : { path: sharedRoot, removed: false, reason: keepShared ? "desktop-installed" : "not-requested" };
+
   let npm = { removed: false, reason: "not-installed" };
   try {
     await execFileAsync(process.platform === "win32" ? "npm.cmd" : "npm", ["uninstall", "-g", "@openai/codex"], { timeout: 30000, windowsHide: true, maxBuffer: 256 * 1024 });
@@ -206,24 +226,43 @@ async function uninstallCodexCli({ log } = {}) {
   } catch (error) {
     npm = { removed: false, error: sanitizeOutput(error?.message) };
   }
+
   const after = await detectCodexCli();
-  const failed = results.filter((item) => item.error);
-  const stillExists = [paths.standaloneDir, paths.programDir, paths.profile].filter((item) => fs.existsSync(item));
-  log?.info("codex-cli", "Standalone Codex CLI uninstall finished", { removed: results.filter((item) => item.removed).length, remaining: stillExists.length });
+  const failed = [...results, sharedRemoval].filter((item) => item.error);
+  const checked = clearShared ? [...targets, sharedRoot] : targets;
+  const stillExists = checked.filter((item) => fs.existsSync(item));
+  const preserved = keepShared
+    ? [sharedRoot, codexPaths.desktopPaths().runtimeDir, codexPaths.desktopPaths().packageStateDir].filter((item) => fs.existsSync(item))
+    : [];
+
+  log?.info("codex-cli", "Bağımsız Codex CLI kaldırma tamamlandı", {
+    removed: results.filter((item) => item.removed).length,
+    remaining: stillExists.length,
+    sharedCleared: clearShared,
+    desktopInstalled: keepShared,
+  });
+
   return {
     ok: failed.length === 0 && stillExists.length === 0,
     before,
     after,
-    removed: results.filter((item) => item.removed).map((item) => item.path),
+    removed: [...results, sharedRemoval].filter((item) => item.removed).map((item) => item.path),
     failed,
     stillExists,
     closedProcesses,
     path: pathResult,
     profile: results[2],
-    legacyConfig,
+    sharedConfig,
+    sharedCleared: clearShared,
     npm,
-    protected: [path.join(paths.home, ".codex"), path.join(process.env.LOCALAPPDATA || path.join(paths.home, "AppData", "Local"), "OpenAI", "Codex")],
+    preserved,
   };
+}
+
+async function planCodexCliUninstall({ desktopInstalled } = {}) {
+  const before = await detectCodexCli();
+  const plan = codexPaths.planRemoval({ target: "cli", otherInstalled: desktopInstalled !== false });
+  return { ...plan, cli: before };
 }
 
 function createCodexCliService({ userDataPath, log, onInstallState, detect = detectCodexCli, spawnProcess = spawn }) {
@@ -440,14 +479,18 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
     }).finally(() => { installPromise = null; });
     return installPromise;
   };
-  const open = async ({ model, useCiziProfile = false } = {}) => {
+  const open = async ({ model, useCizi = false } = {}) => {
     const status = await detect();
     if (!status.installed || !status.command) throw new Error("Codex CLI is not installed on this computer.");
-    const useProfile = useCiziProfile === true;
-    const selectedModel = useProfile ? String(model || "").trim() : "";
+    // The Cizi Code provider now lives in the shared config.toml, which the CLI
+    // reads on its own. A CLI-only profile could not reach ChatGPT Desktop, so
+    // no `--profile` is passed; only the model is forwarded, and only while the
+    // Cizi Code connection is on, since these model ids are gateway-specific.
+    const connected = useCizi === true;
+    const selectedModel = connected ? String(model || "").trim() : "";
     if (selectedModel && !/^[A-Za-z0-9._:-]+$/.test(selectedModel)) throw new Error("The selected Codex model is invalid.");
     const command = String(status.command);
-    const args = useProfile ? ["--profile", "cizicode"] : [];
+    const args = [];
     if (selectedModel) args.push("-m", selectedModel);
     // Codex is a console application.  Electron has no interactive console, so
     // ask Windows to create one while targeting the detected .exe itself.
@@ -462,10 +505,18 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
       windowsVerbatimArguments: true,
     });
     child.unref();
-    log?.info("codex-cli", "Codex CLI opened", { command: status.command, profile: useProfile ? "cizicode" : null, model: selectedModel || null, launch: "direct-exe-in-new-console" });
-    return { opened: true, command: status.command, profile: useProfile ? "cizicode" : null, model: selectedModel || null };
+    log?.info("codex-cli", "Codex CLI açıldı", { command: status.command, connected, model: selectedModel || null, launch: "direct-exe-in-new-console" });
+    return { opened: true, command: status.command, connected, model: selectedModel || null };
   };
-  return { detect: detectCodexCli, install, open, uninstall: (options) => uninstallCodexCli({ ...options, log }), getInstallState: () => installState, officialSiteUrl: OFFICIAL_SITE_URL };
+  return {
+    detect: detectCodexCli,
+    install,
+    open,
+    planUninstall: (options) => planCodexCliUninstall(options),
+    uninstall: (options) => uninstallCodexCli({ ...options, log }),
+    getInstallState: () => installState,
+    officialSiteUrl: OFFICIAL_SITE_URL,
+  };
 }
 
-module.exports = { createCodexCliService, detectCodexCli, uninstallCodexCli, standalonePaths, OFFICIAL_SITE_URL };
+module.exports = { createCodexCliService, detectCodexCli, uninstallCodexCli, planCodexCliUninstall, standalonePaths, OFFICIAL_SITE_URL };

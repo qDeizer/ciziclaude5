@@ -5,58 +5,11 @@
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
-// Minimal TOML helpers. Only handles Codex's flat key = val and [section]
-// shapes, which is enough for config.toml round-tripping here.
-function parseSimpleToml(text) {
-  const out = {};
-  let current = out;
-  for (const line of String(text).split("\n")) {
-    const t = line.trim();
-    if (!t || t.startsWith("#")) continue;
-    const sec = t.match(/^\[(.+?)\]$/);
-    if (sec) {
-      const parts = sec[1].split(".");
-      let obj = out;
-      for (const p of parts) obj = obj[p] = obj[p] || {};
-      current = obj;
-      continue;
-    }
-    const kv = t.match(/^(\S+)\s*=\s*(.+)$/);
-    if (kv) {
-      let v = kv[2].trim();
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-      if (v === "true") v = true;
-      else if (v === "false") v = false;
-      else if (/^-?\d+(\.\d+)?$/.test(v)) v = Number(v);
-      current[kv[1]] = v;
-    }
-  }
-  return out;
-}
-function stringifySimpleToml(obj) {
-  const lines = [];
-  emitTomlObject(lines, "", obj || {});
-  return lines.join("\n") + "\n";
-}
-function emitTomlObject(lines, prefix, obj) {
-  const tables = [];
-  for (const [k, v] of Object.entries(obj || {})) {
-    if (v && typeof v === "object" && !Array.isArray(v)) tables.push([k, v]);
-    else lines.push(`${k} = ${formatTomlVal(v)}`);
-  }
-  for (const [k, inner] of tables) {
-    const section = prefix ? `${prefix}.${k}` : k;
-    lines.push(`[${section}]`);
-    emitTomlObject(lines, section, inner);
-  }
-}
-function formatTomlVal(v) {
-  if (typeof v === "boolean") return v ? "true" : "false";
-  if (typeof v === "number") return String(v);
-  if (Array.isArray(v)) return `[${v.map(formatTomlVal).join(", ")}]`;
-  return `"${String(v).replace(/"/g, '\\"')}"`;
-}
-
+const codexConfig = require("../codexConfigFile");
+// TOML is handled by codexConfigFile, which edits the shared Codex config in
+// place. A naive stringifier used to live here; it could not round-trip the
+// literal strings, arrays and quoted table names the Desktop app writes, so
+// the whole file is no longer regenerated from a parsed object.
 const home = () => os.homedir();
 
 function readJson(file) {
@@ -151,30 +104,37 @@ const TOOLS = {
     },
   },
 
+  // One switch for both local Codex products. ChatGPT Desktop and the
+  // standalone Codex CLI ship the same codex-cli core and read the same
+  // user-level config.toml, so configuring that one file connects both. The
+  // file is edited surgically because the Desktop app writes its own keys into
+  // it while running.
   codex: {
-    id: "codex", name: "Codex CLI", apiType: "openai",
-    files: () => [path.join(home(), ".codex", "cizicode.config.toml")],
+    id: "codex", name: "Codex (CLI + ChatGPT Desktop)", apiType: "openai",
+    files: () => [codexConfig.configPath()],
+    surgicalRevert: true,
     apply(v) {
-      const cfgFile = path.join(home(), ".codex", "cizicode.config.toml");
-      const config = {
-        model: v.model,
-        model_provider: "cizicode",
-        model_providers: {
-          cizicode: {
-            name: "Cizi Code",
-            base_url: withV1(v.base),
-            wire_api: "responses",
-            experimental_bearer_token: v.apiKey,
-          },
-        },
-      };
-      writeText(cfgFile, stringifySimpleToml(config));
+      codexConfig.applyCizi({ base: v.base, apiKey: v.apiKey, model: v.model });
+      // Pre-1.1 builds wrote a separate CLI profile. Leaving it behind would
+      // let the two disagree about which gateway Codex should use.
+      try { fs.rmSync(path.join(home(), ".codex", "cizicode.config.toml"), { force: true }); } catch { /* nothing to clean up */ }
     },
     isApplied(expectedBase) {
-      const txt = readText(path.join(home(), ".codex", "cizicode.config.toml")) || "";
-      const isCizi = txt.includes('model_provider = "cizicode"') || txt.includes("[model_providers.cizicode]");
-      if (!isCizi) return false;
-      return expectedBase ? txt.includes(`base_url = "${withV1(expectedBase)}"`) : true;
+      return codexConfig.readState(expectedBase).applied;
+    },
+    cleanup(expectedBase, { snapshot } = {}) {
+      const state = codexConfig.readState();
+      if (!state.exists) return { changed: false, reason: "not-found" };
+      if (!state.hasProvider && state.modelProvider !== codexConfig.PROVIDER_ID) {
+        return { changed: false, reason: "not-present" };
+      }
+      // A provider block pointing somewhere else was not written by this app.
+      if (expectedBase && state.baseUrl && state.baseUrl !== codexConfig.withV1(expectedBase)) {
+        return { changed: false, reason: "different-endpoint" };
+      }
+      const previousContent = (snapshot?.files || []).find((f) => f.path === codexConfig.configPath() && f.existed)?.content;
+      const previous = codexConfig.readPreviousFromSnapshot(previousContent);
+      return codexConfig.revertCizi({ previousModel: previous.model, previousModelProvider: previous.modelProvider });
     },
   },
 

@@ -10,6 +10,8 @@ const api = require("./apiClient");
 const toolMgr = require("./tools/apply");
 const claudeUninstall = require("./claudeUninstall");
 const { createCodexCliService } = require("./codexCli");
+const { createCodexDesktopService } = require("./codexDesktop");
+const codexConfig = require("./codexConfigFile");
 const log = require("./logger");
 const { CliBridge } = require("./cliBridge");
 
@@ -41,6 +43,11 @@ const codexCli = createCodexCliService({
   userDataPath: app.getPath("userData"),
   log,
   onInstallState: (state) => broadcast("cizi:codexCliInstallState", state),
+});
+const codexDesktop = createCodexDesktopService({
+  userDataPath: app.getPath("userData"),
+  log,
+  onInstallState: (state) => broadcast("cizi:codexDesktopInstallState", state),
 });
 
 function shouldBlockDevToolsShortcut(input) {
@@ -789,11 +796,62 @@ ipcMain.handle("cizi:openClaudeCodeSite", wrap("openClaudeCodeSite", async () =>
 }));
 ipcMain.handle("cizi:getCodexCliStatus", wrap("getCodexCliStatus", async () => codexCli.detect()));
 ipcMain.handle("cizi:installCodexCli", wrap("installCodexCli", async () => codexCli.install()));
-ipcMain.handle("cizi:openCodexCli", wrap("openCodexCli", async ({ model, useCiziProfile } = {}) => codexCli.open({ model, useCiziProfile })));
-ipcMain.handle("cizi:uninstallCodexCli", wrap("uninstallCodexCli", async () => codexCli.uninstall()));
+ipcMain.handle("cizi:openCodexCli", wrap("openCodexCli", async ({ model, useCizi } = {}) => codexCli.open({ model, useCizi })));
+ipcMain.handle("cizi:planCodexCliUninstall", wrap("planCodexCliUninstall", async () => {
+  const desktop = await codexDesktop.detect();
+  return codexCli.planUninstall({ desktopInstalled: desktop.installed });
+}));
+// `desktopInstalled` is resolved here rather than trusted from the renderer, so
+// a stale UI can never authorise deleting data ChatGPT Desktop still needs.
+ipcMain.handle("cizi:uninstallCodexCli", wrap("uninstallCodexCli", async ({ removeShared } = {}) => {
+  const desktop = await codexDesktop.detect();
+  return codexCli.uninstall({ desktopInstalled: desktop.installed, removeShared: removeShared === true });
+}));
 ipcMain.handle("cizi:openCodexCliSite", wrap("openCodexCliSite", async () => {
   await shell.openExternal(codexCli.officialSiteUrl);
   return { opened: true, url: codexCli.officialSiteUrl };
+}));
+
+ipcMain.handle("cizi:getCodexDesktopStatus", wrap("getCodexDesktopStatus", async () => codexDesktop.detect()));
+ipcMain.handle("cizi:installCodexDesktop", wrap("installCodexDesktop", async () => codexDesktop.install()));
+ipcMain.handle("cizi:openCodexDesktop", wrap("openCodexDesktop", async () => codexDesktop.open()));
+ipcMain.handle("cizi:restartCodexDesktop", wrap("restartCodexDesktop", async () => codexDesktop.restart()));
+ipcMain.handle("cizi:planCodexDesktopUninstall", wrap("planCodexDesktopUninstall", async () => {
+  const cli = await codexCli.detect();
+  return codexDesktop.planUninstall({ cliInstalled: cli.installed });
+}));
+ipcMain.handle("cizi:uninstallCodexDesktop", wrap("uninstallCodexDesktop", async ({ removeShared } = {}) => {
+  const cli = await codexCli.detect();
+  return codexDesktop.uninstall({ cliInstalled: cli.installed, removeShared: removeShared === true });
+}));
+ipcMain.handle("cizi:openCodexDesktopStore", wrap("openCodexDesktopStore", async () => {
+  await shell.openExternal(codexDesktop.storeUrl);
+  return { opened: true, url: codexDesktop.storeUrl };
+}));
+
+// Shared state for the single Codex switch: what the one config.toml currently
+// says, and which of the two products would be affected by changing it.
+ipcMain.handle("cizi:getCodexState", wrap("getCodexState", async () => {
+  const [cli, desktop] = await Promise.all([codexCli.detect(), codexDesktop.detect()]);
+  const config = codexConfig.readState(api.TOOL_BASE_URL);
+  return {
+    cli,
+    desktop,
+    config: { ...config, tokenConfigured: config.tokenConfigured === true },
+    sharesConfig: true,
+    configPath: codexConfig.configPath(),
+  };
+}));
+
+// Switching models keeps one provider and changes only `model`. Both products
+// read the new value when they next start, so the caller is told to restart.
+ipcMain.handle("cizi:setCodexModel", wrap("setCodexModel", async ({ model } = {}) => {
+  const state = codexConfig.readState(api.TOOL_BASE_URL);
+  if (!state.applied) throw new Error("Model değiştirmeden önce Codex bağlantısını açın.");
+  const result = codexConfig.setModel(model);
+  const desktop = await codexDesktop.detect();
+  log.info("codex", "Codex modeli değiştirildi", { model: result.model, changed: result.changed });
+  return { ...result, restartRequired: desktop.installed, desktopInstalled: desktop.installed };
 }));
 
 ipcMain.handle("cizi:listTools", wrap("listTools", async () => toolMgr.listToolStatuses(api.TOOL_BASE_URL)));
@@ -820,7 +878,14 @@ ipcMain.handle("cizi:applyTool", wrap("applyTool", async ({ toolId, modelSlots }
 ipcMain.handle("cizi:revertTool", wrap("revertTool", async ({ toolId }) => {
   log.info("tools", `Revert ${toolId}`);
   const res = toolMgr.revertTool(toolId, api.TOOL_BASE_URL);
-  log.info("tools", `Reverted ${toolId}`, { restored: res?.restored });
+  // A surgical revert reports restored=false by design: it undoes only its own
+  // keys instead of putting a whole snapshot back over the file.
+  log.info("tools", `Reverted ${toolId}`, {
+    restored: res?.restored,
+    surgical: res?.surgical === true,
+    stillApplied: res?.applied === true,
+    cleanup: res?.cleanup?.reason || (res?.cleanup?.changed ? "changed" : null),
+  });
   return res;
 }));
 

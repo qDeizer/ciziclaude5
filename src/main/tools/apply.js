@@ -14,6 +14,19 @@ function applyTool(toolId, values) {
 function revertTool(toolId, base) {
   const tool = getTool(toolId);
   if (!tool) throw new Error(`Unknown tool: ${toolId}`);
+
+  // Some config files are actively written by the app that owns them while
+  // Cizi Code is connected (the shared Codex config is). Restoring a whole
+  // snapshot over such a file would discard everything that app has changed
+  // since, so those tools undo only their own keys and the snapshot is used
+  // purely as the record of what those keys were.
+  if (tool.surgicalRevert) {
+    const cleanup = tool.cleanup(base, { snapshot: backup.readSnapshot(toolId) });
+    const applied = safeApplied(tool, base);
+    if (!applied) backup.dropSnapshot(toolId);
+    return { ok: true, restored: false, surgical: true, cleanup, applied, files: tool.files() };
+  }
+
   const res = backup.restoreSnapshot(toolId);
   let cleanup = null;
   let applied = safeApplied(tool, base);

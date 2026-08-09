@@ -24,11 +24,43 @@ assert(cliUi.includes('dispatchEvent(new Event("change"'), "CLI list/switch acti
 assert(!cli.includes("cizi.applyTool") && !cli.includes("cizi.login"), "CLI must not call application actions directly");
 assert(main.includes("cizi:getCodexCliStatus"), "main must expose Codex CLI status through the UI boundary");
 assert(preload.includes("installCodexCli"), "preload must expose Codex CLI install action");
-assert(preload.includes("openCodexCli: (model, useCiziProfile)"), "preload must pass the optional Cizi Code profile choice to Codex open");
-assert(renderer.includes("codex-cli.install"), "renderer must expose the Codex CLI install control");
-assert(renderer.includes('"codex-cli"'), "renderer must expose the Codex configuration switch");
-assert(renderer.includes("!!st.applied"), "Codex open must use the Cizi Code profile only when its switch is enabled");
-assert(cli.includes("codex-cli.install"), "CLI bridge must allow the long-running Codex install action");
+assert(preload.includes("openCodexCli: (model, useCizi)"), "preload must pass the connection state to Codex open");
+assert(renderer.includes('idPrefix: "codex-cli"'), "renderer must expose the Codex CLI controls");
+assert(renderer.includes('cliId: `${idPrefix}.install`'), "each Codex product must expose an install control");
+assert(renderer.includes('cliId: `${idPrefix}.purge`'), "each Codex product must expose a root-removal control");
+assert(renderer.includes('cb.dataset.cliId = "tool.codex.switch"'), "renderer must expose one Codex configuration switch");
+assert(renderer.includes("!!st.applied"), "Codex open must forward the gateway model only when its switch is enabled");
+assert(cli.includes("codex-cli.install") && cli.includes("codex-desktop.install"), "CLI bridge must allow the long-running Codex install actions");
+
+// ChatGPT Desktop and the Codex CLI share one config file, so one switch has to
+// reach both, and every Desktop action needs the same UI/CLI parity.
+const codexDesktop = read("src/main/codexDesktop.js");
+const codexPaths = read("src/main/codexPaths.js");
+const codexConfigFile = read("src/main/codexConfigFile.js");
+assert(main.includes("cizi:getCodexDesktopStatus"), "main must expose ChatGPT Desktop status");
+assert(main.includes("cizi:installCodexDesktop"), "main must expose ChatGPT Desktop installation");
+assert(main.includes("cizi:planCodexDesktopUninstall"), "main must expose the Desktop removal preview");
+assert(main.includes("cizi:uninstallCodexDesktop"), "main must expose ChatGPT Desktop removal");
+assert(main.includes("cizi:setCodexModel"), "main must expose the Codex model switch");
+assert(preload.includes("getCodexState"), "preload must expose the combined Codex state");
+assert(preload.includes("installCodexDesktop") && preload.includes("uninstallCodexDesktop"), "preload must expose the Desktop install and removal actions");
+assert(renderer.includes('idPrefix: "codex-desktop"'), "renderer must expose the ChatGPT Desktop controls");
+assert(renderer.includes('modelSelect.dataset.cliId = "tool.codex.model"'), "renderer must expose the Codex model list to the CLI");
+assert(codexPaths.includes('DESKTOP_STORE_ID = "9PLM9XGG6VKS"'), "the Desktop install must use the verified Microsoft Store id");
+assert(codexDesktop.includes('"--source", "msstore"'), "ChatGPT Desktop must be installed from the official Microsoft Store source");
+assert(codexDesktop.includes("Remove-AppxPackage"), "ChatGPT Desktop must be removed through the supported package mechanism");
+assert(!/takeown|icacls/i.test(codexDesktop), "WindowsApps ownership must never be changed by hand");
+assert(codexDesktop.includes("after.installed ? [] : targets.map(removePath)"), "leftover Desktop state may only be cleared once Windows no longer reports the package");
+assert(codexPaths.includes("sharedRemovable"), "removal must state whether the shared Codex folder can be cleared");
+assert(main.includes("codexDesktop.detect()") && main.includes("codexCli.detect()"), "the other product's presence must be resolved in main, not trusted from the renderer");
+assert(codexConfigFile.includes("experimental_bearer_token"), "the API key must be written straight into the provider config");
+assert(!/env_key/.test(codexConfigFile), "the Codex provider must not depend on an environment variable");
+assert(codexConfigFile.includes("writeVerified"), "every config write must be read back and verified");
+assert(codexConfigFile.includes("fs.writeFileSync(target, previousText"), "a failed verification must restore the previous config bytes");
+// Electron's Node cannot require() an ES-only module, so the runtime must not
+// depend on one; the tests parse the results with a real TOML parser instead.
+assert(!/require\(["']confbox["']\)/.test(codexConfigFile), "the main process must not require the ES-only TOML package");
+assert(!codexCli.includes('"--profile"'), "a CLI-only profile cannot configure ChatGPT Desktop and must not be passed to Codex");
 assert(codexCli.includes("https://chatgpt.com/codex/install.ps1"), "Codex installer must use the official Windows installer URL");
 assert(codexCli.includes('percent: null, message: "Downloading the official Codex installer..."'), "Codex installer must mark an unknown download percentage as indeterminate");
 assert(renderer.includes('stepPercent > 0 || rawActive?.status === "done"'), "Codex activity must not present an unknown installer percentage as 0%");

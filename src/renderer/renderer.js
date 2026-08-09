@@ -10,7 +10,10 @@ var CLAUDE_CLI_STATUS = { installed: false, command: null, version: null };
 var CLAUDE_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
 var CODEX_CLI_STATUS = { installed: false, command: null, version: null };
 var CODEX_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
-var CODEX_SELECTED_MODEL = "gpt-5.6-luna";
+var CODEX_DESKTOP_STATUS = { installed: false, version: null, packageFullName: null };
+var CODEX_DESKTOP_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
+var CODEX_CONFIG_STATE = { applied: false, model: null, path: null };
+var CODEX_SELECTED_MODEL = null;
 var ME = null;
 var LOG_TIMER = null;
 var LAST_USAGE_REFRESH = null;
@@ -18,6 +21,7 @@ const CLAUDE_CODE_CLI_TOOL_ID = "claude-code";
 const CLAUDE_CODE_CLI_NAME = "Claude Code CLI";
 const CODEX_CLI_TOOL_ID = "codex";
 const CODEX_CLI_NAME = "Codex CLI";
+const CODEX_DESKTOP_NAME = "ChatGPT Desktop";
 var FIRST_RELEASE_TOOLS = [CLAUDE_CODE_CLI_TOOL_ID, CODEX_CLI_TOOL_ID];
 
 function clog(level, msg, meta) {
@@ -258,9 +262,16 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 async function loadTemplatesAndTools() {
-  const [toolsRes, claudeRes, codexRes] = await Promise.all([cizi.listTools(), cizi.getClaudeCodeStatus(), cizi.getCodexCliStatus()]);
+  const [toolsRes, claudeRes, codexRes] = await Promise.all([cizi.listTools(), cizi.getClaudeCodeStatus(), cizi.getCodexState()]);
   CLAUDE_CLI_STATUS = claudeRes?.ok ? (claudeRes.data || { installed: false }) : { installed: false };
-  CODEX_CLI_STATUS = codexRes?.ok ? (codexRes.data || { installed: false }) : { installed: false };
+  // One call reports both Codex products and the shared config they read.
+  const codex = codexRes?.ok ? (codexRes.data || {}) : {};
+  CODEX_CLI_STATUS = codex.cli || { installed: false };
+  CODEX_DESKTOP_STATUS = codex.desktop || { installed: false };
+  CODEX_CONFIG_STATE = { ...(codex.config || { applied: false }), path: codex.configPath || null };
+  // The model box follows what the shared config actually says, so the UI never
+  // claims a model that Codex is not really using.
+  if (CODEX_CONFIG_STATE.applied && CODEX_CONFIG_STATE.model) CODEX_SELECTED_MODEL = CODEX_CONFIG_STATE.model;
   TEMPLATES = buildDefaultTemplates();
   renderTools(toolsRes.ok ? toolsRes.data : []);
 }
@@ -285,10 +296,21 @@ function updateCodexInstallFeedback(state) {
   renderCliInstallActivity(CODEX_INSTALL_STATE, "codex");
 }
 
+function updateCodexDesktopInstallFeedback(state) {
+  CODEX_DESKTOP_INSTALL_STATE = { ...CODEX_DESKTOP_INSTALL_STATE, ...(state || {}) };
+  renderCliInstallActivity(CODEX_DESKTOP_INSTALL_STATE, "codex-desktop");
+}
+
+const INSTALL_ACTIVITY_TARGETS = {
+  claude: { box: "claude-cli-install-activity", name: CLAUDE_CODE_CLI_NAME },
+  codex: { box: "codex-cli-install-activity", name: CODEX_CLI_NAME },
+  "codex-desktop": { box: "codex-desktop-install-activity", name: CODEX_DESKTOP_NAME },
+};
+
 function renderCliInstallActivity(state, cli) {
-  const isCodex = cli === "codex";
-  const cliName = isCodex ? CODEX_CLI_NAME : CLAUDE_CODE_CLI_NAME;
-  const box = document.getElementById(isCodex ? "codex-cli-install-activity" : "claude-cli-install-activity");
+  const target = INSTALL_ACTIVITY_TARGETS[cli] || INSTALL_ACTIVITY_TARGETS.claude;
+  const cliName = target.name;
+  const box = document.getElementById(target.box);
   if (!box) return;
   const operations = Array.isArray(state?.operations) ? state.operations : [];
   const visible = operations.length > 0 && state?.status !== "idle";
@@ -438,60 +460,352 @@ function renderClaudeInstallActions(row, info) {
   row.appendChild(actions);
 }
 
-function renderCodexInstallActions(row, info) {
-  const actions = document.createElement("div");
-  actions.className = "tool-actions tool-install-actions";
-  const buttons = document.createElement("div");
-  buttons.className = "tool-actions-buttons";
-  const install = document.createElement("button");
-  install.type = "button";
-  install.className = "primary tiny-btn";
-  install.dataset.cliId = "codex-cli.install";
-  install.dataset.cliLabel = "Install Codex CLI";
-  install.dataset.cliAwait = "long";
-  install.dataset.cliAwaitTimeout = String(10 * 60 * 1000);
-  install.textContent = "İndir ve Kur";
-  const site = document.createElement("button");
-  site.type = "button";
-  site.className = "ghost tiny-btn";
-  site.dataset.cliId = "codex-cli.official-site";
-  site.dataset.cliLabel = "Open official Codex CLI site";
-  site.textContent = "Resmi indirme sitesi";
-  install.addEventListener("click", async () => {
-    install.disabled = true;
-    site.disabled = true;
-    install.textContent = "Kuruluyor...";
-    updateCodexInstallFeedback({ status: "starting", percent: 0, message: "Resmî Codex yükleyicisi başlatılıyor..." });
-    let res;
-    try { res = await cizi.installCodexCli(); } catch (error) { res = { ok: false, error: error?.message || "Codex CLI kurulamadı." }; }
-    if (res.ok && res.data?.installed) {
-      CODEX_CLI_STATUS = res.data;
-      updateCodexInstallFeedback({ status: "installed", percent: 100, message: "Codex CLI kuruldu." });
-      toast("Codex CLI kuruldu.", "good");
-      await loadTemplatesAndTools();
-      setTimeout(() => updateCodexInstallFeedback({ status: "idle", percent: 0, message: "", operations: [] }), 2500);
-    } else {
-      install.disabled = false;
-      site.disabled = false;
-      install.textContent = "İndir ve Kur";
-      updateCodexInstallFeedback({ status: "error", message: res.error || "Codex CLI kurulamadı." });
-      toast(clientMessage(res.error || "Codex CLI kurulamadı."), "bad");
-    }
-  });
-  site.addEventListener("click", async () => {
-    const res = await cizi.openCodexCliSite();
-    if (!res.ok) toast(clientMessage(res.error || "Resmî indirme sitesi açılamadı."), "bad");
-  });
-  buttons.appendChild(install);
-  buttons.appendChild(site);
-  actions.appendChild(buttons);
-  row.appendChild(info);
-  row.appendChild(actions);
+function button({ label, className, cliId, cliLabel, title, onClick, long }) {
+  const element = document.createElement("button");
+  element.type = "button";
+  element.className = className;
+  element.dataset.cliId = cliId;
+  element.dataset.cliLabel = cliLabel || label;
+  if (title) element.title = title;
+  if (long) {
+    element.dataset.cliAwait = "long";
+    element.dataset.cliAwaitTimeout = String(15 * 60 * 1000);
+  }
+  element.textContent = label;
+  element.addEventListener("click", onClick);
+  return element;
 }
 
+// Model ids come from the gateway. The two documented defaults stay as a
+// fallback for keys whose model list has not loaded yet, and whatever the
+// shared config currently names is always offered so the UI can display the
+// real state rather than silently switching the user to something else.
 function codexModelIds(models) {
-  const names = (models || []).map((m) => typeof m === "string" ? m : m?.name).filter(Boolean);
-  return [...new Set(["gpt-5.6-luna", "gpt-5.6-terra", ...names])];
+  const names = (models || []).map((m) => (typeof m === "string" ? m : m?.name)).filter(Boolean);
+  const fallback = names.length ? [] : ["gpt-5.6-luna", "gpt-5.6-terra"];
+  const current = [CODEX_CONFIG_STATE.model, CODEX_SELECTED_MODEL].filter(Boolean);
+  return [...new Set([...names, ...fallback, ...current])];
+}
+
+const CODEX_PREFERRED_MODEL = "gpt-5.6-luna";
+
+// What the model box should start on. The connected config wins, because that
+// is what Codex is really using. Otherwise the documented Codex default is
+// preferred over the account's first model, which may well be a model that
+// belongs to a different tool.
+function codexDefaultModel(models) {
+  const ids = codexModelIds(models);
+  if (CODEX_CONFIG_STATE.applied && CODEX_CONFIG_STATE.model && ids.includes(CODEX_CONFIG_STATE.model)) return CODEX_CONFIG_STATE.model;
+  if (CODEX_SELECTED_MODEL && ids.includes(CODEX_SELECTED_MODEL)) return CODEX_SELECTED_MODEL;
+  if (ids.includes(CODEX_PREFERRED_MODEL)) return CODEX_PREFERRED_MODEL;
+  return ids.find((id) => /^gpt-/i.test(id)) || ids[0] || null;
+}
+
+function describeRemovalPlan(plan, productName) {
+  const removeList = (plan?.remove || []).map((item) => `  • ${item.path}\n    (${item.reason})`).join("\n");
+  const preserveList = (plan?.preserve || []).map((item) => `  • ${item.path}\n    (${item.reason})`).join("\n");
+  const lines = [`${productName} kökten kaldırılacak.`, ""];
+  if (removeList) lines.push("SİLİNECEK:", removeList, "");
+  if (preserveList) lines.push("KORUNACAK:", preserveList, "");
+  if (plan?.sharedRemovable) {
+    lines.push("Bu bilgisayarda başka Codex ürünü kalmıyor, bu yüzden ortak Codex klasörü de silinecek.");
+    lines.push("Bu klasörde oturum bilgileri, sohbet geçmişi ve ayarlar bulunur.", "");
+  } else {
+    lines.push("Diğer Codex ürünü kurulu olduğu için ortak klasöre ve ayar dosyasına dokunulmayacak.", "");
+  }
+  lines.push("Devam edilsin mi?");
+  return lines.join("\n");
+}
+
+// One product line inside the Codex row: install when missing, open/remove when
+// present. Both products use the same shape so the two stay comparable.
+function codexProductBlock({ name, idPrefix, status, detail, installLabel, onInstall, onOpen, onRemove, onSite, siteLabel, feedback }) {
+  const block = document.createElement("div");
+  block.className = "codex-product";
+
+  const head = document.createElement("div");
+  head.className = "codex-product-info";
+  const title = document.createElement("div");
+  title.className = "codex-product-name";
+  title.textContent = name;
+  const sub = document.createElement("div");
+  sub.className = "tool-sub";
+  sub.textContent = detail;
+  head.appendChild(title);
+  head.appendChild(sub);
+
+  const actions = document.createElement("div");
+  actions.className = "tool-actions-buttons";
+
+  if (status.installed) {
+    actions.appendChild(button({
+      label: "Aç", className: "ghost tiny-btn", cliId: `${idPrefix}.open`, cliLabel: `${name} aç`, onClick: onOpen,
+    }));
+    actions.appendChild(button({
+      label: "Kökten Kaldır", className: "ghost tiny-btn danger", cliId: `${idPrefix}.purge`,
+      cliLabel: `${name} kökten kaldır`, onClick: onRemove,
+    }));
+  } else {
+    actions.appendChild(button({
+      label: installLabel, className: "primary tiny-btn", cliId: `${idPrefix}.install`,
+      cliLabel: `${name} kur`, long: true, onClick: onInstall,
+    }));
+    actions.appendChild(button({
+      label: siteLabel, className: "ghost tiny-btn", cliId: `${idPrefix}.official-site`,
+      cliLabel: `${name} resmî sayfası`, onClick: onSite,
+    }));
+  }
+
+  block.appendChild(head);
+  block.appendChild(actions);
+  void feedback;
+  return block;
+}
+
+// The Codex row. ChatGPT Desktop and the Codex CLI run the same codex-cli core
+// and read the same ~/.codex/config.toml, so a single switch configures both.
+function renderCodexRow(st, models) {
+  const row = document.createElement("div");
+  row.className = "tool-row codex-row";
+
+  const info = document.createElement("div");
+  info.className = "tool-info";
+  const name = document.createElement("div");
+  name.className = "tool-name";
+  name.textContent = st.name;
+  const sub = document.createElement("div");
+  sub.className = "tool-sub";
+  const anyInstalled = CODEX_DESKTOP_STATUS.installed || CODEX_CLI_STATUS.installed;
+  sub.textContent = st.applied
+    ? `Bağlı — tek ayar dosyası ikisini de yönetiyor (${CODEX_CONFIG_STATE.path || "~/.codex/config.toml"})`
+    : anyInstalled
+      ? "Tek anahtar ChatGPT Desktop ve Codex CLI'yi birlikte Cizi Code'a bağlar"
+      : "Bağlamak için önce en az bir Codex ürünü kurun";
+  info.appendChild(name);
+  info.appendChild(sub);
+
+  const actions = document.createElement("div");
+  actions.className = "tool-actions";
+
+  const modelSelect = document.createElement("select");
+  modelSelect.className = "tool-model";
+  modelSelect.dataset.cliId = "tool.codex.model";
+  modelSelect.dataset.cliLabel = "Codex modeli";
+  const selected = codexDefaultModel(models);
+  CODEX_SELECTED_MODEL = selected;
+  for (const modelId of codexModelIds(models)) {
+    const option = document.createElement("option");
+    option.value = modelId;
+    option.textContent = modelId;
+    option.selected = modelId === selected;
+    modelSelect.appendChild(option);
+  }
+  modelSelect.addEventListener("change", async () => {
+    CODEX_SELECTED_MODEL = modelSelect.value;
+    // While connected the model lives in the shared config, so the change is
+    // written straight through; both products pick it up on next start.
+    if (!st.applied) return;
+    modelSelect.disabled = true;
+    const res = await cizi.setCodexModel(modelSelect.value);
+    modelSelect.disabled = false;
+    if (!res.ok) {
+      toast(clientMessage(res.error || "Model değiştirilemedi."), "bad");
+      return;
+    }
+    clog("info", `Codex modeli ${modelSelect.value} olarak ayarlandı`);
+    toast(res.data?.restartRequired
+      ? `Model ${modelSelect.value}. ChatGPT Desktop'ı yeniden başlatıp yeni bir Codex sohbeti açın.`
+      : `Model ${modelSelect.value}.`, "good");
+    await loadTemplatesAndTools();
+  });
+  actions.appendChild(modelSelect);
+
+  const sw = document.createElement("label");
+  sw.className = "switch";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.dataset.cliId = "tool.codex.switch";
+  cb.dataset.cliLabel = "Codex bağlantısı";
+  cb.checked = !!st.applied;
+  cb.disabled = !anyInstalled;
+  if (!anyInstalled) sw.title = "Önce ChatGPT Desktop veya Codex CLI kurun";
+  const slider = document.createElement("span");
+  slider.className = "slider";
+  sw.appendChild(cb);
+  sw.appendChild(slider);
+  actions.appendChild(sw);
+
+  cb.addEventListener("change", async () => {
+    cb.disabled = true;
+    const turningOn = cb.checked;
+    clog("info", `Codex: ${turningOn ? "bağlanıyor" : "geri alınıyor"}`, { tool: st.id });
+    if (turningOn) {
+      const model = CODEX_SELECTED_MODEL;
+      if (!model) {
+        toast("Bu anahtar için model bulunamadı.", "bad");
+        cb.checked = false;
+        cb.disabled = false;
+        return;
+      }
+      const res = await cizi.applyTool(st.id, { model, models: codexModelIds(models) });
+      if (res.ok) {
+        toast(CODEX_DESKTOP_STATUS.installed
+          ? "Codex bağlandı. ChatGPT Desktop'ı yeniden başlatıp yeni bir Codex sohbeti açın."
+          : "Codex bağlandı.", "good");
+      } else {
+        toast(clientMessage(res.error || "Codex bağlanamadı."), "bad");
+        cb.checked = false;
+      }
+    } else {
+      const res = await cizi.revertTool(st.id);
+      if (res.ok && !res.data?.applied) toast("Codex bağlantısı kaldırıldı; diğer ayarlarınız korundu.", "good");
+      else {
+        toast(clientMessage(res.error || "Codex bağlantısı geri alınamadı."), "bad");
+        cb.checked = true;
+      }
+    }
+    cb.disabled = false;
+    await loadTemplatesAndTools();
+    loadLogs();
+  });
+
+  row.appendChild(info);
+  row.appendChild(actions);
+
+  const products = document.createElement("div");
+  products.className = "codex-products";
+
+  products.appendChild(codexProductBlock({
+    name: CODEX_DESKTOP_NAME,
+    idPrefix: "codex-desktop",
+    status: CODEX_DESKTOP_STATUS,
+    detail: CODEX_DESKTOP_STATUS.installed
+      ? `Kurulu · sürüm ${CODEX_DESKTOP_STATUS.version || "bilinmiyor"}`
+      : "Kurulu değil · Microsoft Store'dan kurulur",
+    installLabel: "İndir ve Kur",
+    siteLabel: "Mağaza sayfası",
+    onInstall: async (event) => {
+      const target = event.currentTarget;
+      target.disabled = true;
+      target.textContent = "Kuruluyor...";
+      updateCodexDesktopInstallFeedback({ status: "starting", percent: null, message: "Microsoft Store kurulumu başlatılıyor...", operations: [] });
+      let res;
+      try { res = await cizi.installCodexDesktop(); } catch (error) { res = { ok: false, error: error?.message || "ChatGPT Desktop kurulamadı." }; }
+      if (res.ok && res.data?.installed) {
+        updateCodexDesktopInstallFeedback({ status: "installed", percent: 100, message: "ChatGPT Desktop kuruldu." });
+        toast("ChatGPT Desktop kuruldu.", "good");
+        clog("success", "ChatGPT Desktop kuruldu");
+        await loadTemplatesAndTools();
+        setTimeout(() => updateCodexDesktopInstallFeedback({ status: "idle", percent: null, message: "", operations: [] }), 2500);
+      } else {
+        target.disabled = false;
+        target.textContent = "İndir ve Kur";
+        updateCodexDesktopInstallFeedback({ status: "error", message: res.error || "ChatGPT Desktop kurulamadı." });
+        toast(clientMessage(res.error || "ChatGPT Desktop kurulamadı."), "bad");
+      }
+    },
+    onSite: async () => {
+      const res = await cizi.openCodexDesktopStore();
+      if (!res.ok) toast(clientMessage(res.error || "Mağaza sayfası açılamadı."), "bad");
+    },
+    onOpen: async (event) => {
+      const target = event.currentTarget;
+      target.disabled = true;
+      const res = await cizi.openCodexDesktop();
+      target.disabled = false;
+      if (res.ok) toast("ChatGPT Desktop açıldı.", "good");
+      else toast(clientMessage(res.error || "ChatGPT Desktop açılamadı."), "bad");
+    },
+    onRemove: async (event) => {
+      const target = event.currentTarget;
+      const planRes = await cizi.planCodexDesktopUninstall();
+      if (!planRes.ok) {
+        toast(clientMessage(planRes.error || "Kaldırma planı hazırlanamadı."), "bad");
+        return;
+      }
+      const plan = planRes.data;
+      if (!confirm(describeRemovalPlan(plan, CODEX_DESKTOP_NAME))) return;
+      target.disabled = true;
+      target.textContent = "Kaldırılıyor...";
+      clog("info", "ChatGPT Desktop kökten kaldırılıyor", { sharedRemovable: plan.sharedRemovable });
+      const res = await cizi.uninstallCodexDesktop(plan.sharedRemovable === true);
+      if (res.ok && res.data?.ok) {
+        toast("ChatGPT Desktop kaldırıldı.", "good");
+        clog("success", "ChatGPT Desktop kökten kaldırıldı");
+      } else {
+        toast(clientMessage(res.error || "Kaldırma kısmen tamamlandı."), "bad");
+        clog("warning", "ChatGPT Desktop kaldırma kısmen tamamlandı");
+      }
+      await loadTemplatesAndTools();
+    },
+  }));
+
+  products.appendChild(codexProductBlock({
+    name: CODEX_CLI_NAME,
+    idPrefix: "codex-cli",
+    status: CODEX_CLI_STATUS,
+    detail: CODEX_CLI_STATUS.installed
+      ? `Kurulu · ${CODEX_CLI_STATUS.version || CODEX_CLI_STATUS.command}`
+      : "Kurulu değil · resmî yükleyiciyle kurulur",
+    installLabel: "İndir ve Kur",
+    siteLabel: "Resmî site",
+    onInstall: async (event) => {
+      const target = event.currentTarget;
+      target.disabled = true;
+      target.textContent = "Kuruluyor...";
+      updateCodexInstallFeedback({ status: "starting", percent: null, message: "Resmî Codex yükleyicisi başlatılıyor...", operations: [] });
+      let res;
+      try { res = await cizi.installCodexCli(); } catch (error) { res = { ok: false, error: error?.message || "Codex CLI kurulamadı." }; }
+      if (res.ok && res.data?.installed) {
+        updateCodexInstallFeedback({ status: "installed", percent: 100, message: "Codex CLI kuruldu." });
+        toast("Codex CLI kuruldu.", "good");
+        await loadTemplatesAndTools();
+        setTimeout(() => updateCodexInstallFeedback({ status: "idle", percent: null, message: "", operations: [] }), 2500);
+      } else {
+        target.disabled = false;
+        target.textContent = "İndir ve Kur";
+        updateCodexInstallFeedback({ status: "error", message: res.error || "Codex CLI kurulamadı." });
+        toast(clientMessage(res.error || "Codex CLI kurulamadı."), "bad");
+      }
+    },
+    onSite: async () => {
+      const res = await cizi.openCodexCliSite();
+      if (!res.ok) toast(clientMessage(res.error || "Resmî site açılamadı."), "bad");
+    },
+    onOpen: async (event) => {
+      const target = event.currentTarget;
+      target.disabled = true;
+      const res = await cizi.openCodexCli(CODEX_SELECTED_MODEL, !!st.applied);
+      target.disabled = false;
+      if (res.ok) toast(st.applied ? "Codex CLI Cizi Code bağlantısıyla açıldı." : "Codex CLI kendi ayarlarıyla açıldı.", "good");
+      else toast(clientMessage(res.error || "Codex CLI başlatılamadı."), "bad");
+    },
+    onRemove: async (event) => {
+      const target = event.currentTarget;
+      const planRes = await cizi.planCodexCliUninstall();
+      if (!planRes.ok) {
+        toast(clientMessage(planRes.error || "Kaldırma planı hazırlanamadı."), "bad");
+        return;
+      }
+      const plan = planRes.data;
+      if (!confirm(describeRemovalPlan(plan, CODEX_CLI_NAME))) return;
+      target.disabled = true;
+      target.textContent = "Kaldırılıyor...";
+      clog("info", "Codex CLI kökten kaldırılıyor", { sharedRemovable: plan.sharedRemovable });
+      const res = await cizi.uninstallCodexCli(plan.sharedRemovable === true);
+      if (res.ok && res.data?.ok) {
+        toast("Codex CLI kaldırıldı.", "good");
+        clog("success", "Codex CLI kökten kaldırıldı");
+      } else {
+        toast(clientMessage(res.error || "Kaldırma kısmen tamamlandı."), "bad");
+        clog("warning", "Codex CLI kaldırma kısmen tamamlandı");
+      }
+      await loadTemplatesAndTools();
+    },
+  }));
+
+  row.appendChild(products);
+  return row;
 }
 
 function renderTools(statuses) {
@@ -524,6 +838,13 @@ function renderTools(statuses) {
   for (const st of statuses) {
     if (!offered.includes(st.id)) continue;
 
+    // Codex is one switch over two products sharing one config file, so its
+    // row is built on its own instead of through the single-tool layout.
+    if (st.id === CODEX_CLI_TOOL_ID) {
+      list.appendChild(renderCodexRow(st, models));
+      continue;
+    }
+
     const row = document.createElement("div");
     row.className = "tool-row";
 
@@ -536,8 +857,8 @@ function renderTools(statuses) {
 
     const sub = document.createElement("div");
     sub.className = "tool-sub";
-    const managedCliName = st.id === CODEX_CLI_TOOL_ID ? CODEX_CLI_NAME : CLAUDE_CODE_CLI_NAME;
-    const managedCliStatus = st.id === CODEX_CLI_TOOL_ID ? CODEX_CLI_STATUS : st.id === CLAUDE_CODE_CLI_TOOL_ID ? CLAUDE_CLI_STATUS : null;
+    const managedCliName = CLAUDE_CODE_CLI_NAME;
+    const managedCliStatus = st.id === CLAUDE_CODE_CLI_TOOL_ID ? CLAUDE_CLI_STATUS : null;
     sub.textContent = st.applied
       ? `${managedCliName} is connected to Cizi Code`
       : managedCliStatus?.installed
@@ -555,29 +876,8 @@ function renderTools(statuses) {
       list.appendChild(row);
       continue;
     }
-    if (st.id === CODEX_CLI_TOOL_ID && !CODEX_CLI_STATUS.installed) {
-      sub.textContent = CODEX_CLI_STATUS.message || `${CODEX_CLI_NAME} is not installed on this computer.`;
-      renderCodexInstallActions(row, info);
-      list.appendChild(row);
-      continue;
-    }
     const actions = document.createElement("div");
     actions.className = "tool-actions";
-    if (st.id === CODEX_CLI_TOOL_ID) {
-      const modelSelect = document.createElement("select");
-      modelSelect.className = "tool-model";
-      modelSelect.dataset.cliId = "tool.codex-cli.model";
-      modelSelect.dataset.cliLabel = "Codex model";
-      for (const modelId of codexModelIds(models)) {
-        const option = document.createElement("option");
-        option.value = modelId;
-        option.textContent = modelId;
-        option.selected = modelId === CODEX_SELECTED_MODEL;
-        modelSelect.appendChild(option);
-      }
-      modelSelect.addEventListener("change", () => { CODEX_SELECTED_MODEL = modelSelect.value; });
-      actions.appendChild(modelSelect);
-    }
     const sw = document.createElement("label");
     sw.className = "switch";
     const cb = document.createElement("input");
@@ -592,53 +892,6 @@ function renderTools(statuses) {
     sw.appendChild(cb);
     sw.appendChild(slider);
     actions.appendChild(sw);
-    if (st.id === CODEX_CLI_TOOL_ID && CODEX_CLI_STATUS.installed) {
-      const openBtn = document.createElement("button");
-      openBtn.type = "button";
-      openBtn.className = "ghost tiny-btn";
-      openBtn.dataset.cliId = "codex-cli.open";
-      openBtn.dataset.cliLabel = "Open Codex CLI";
-      openBtn.textContent = "Aç";
-      openBtn.title = st.applied ? "Codex'i Cizi Code profiliyle aç" : "Önce Cizi Code bağlantısını açın";
-      openBtn.title = st.applied ? "Open Codex CLI with the Cizi Code profile" : "Open Codex CLI with its default settings";
-      openBtn.addEventListener("click", async () => {
-        openBtn.disabled = true;
-        const res = await cizi.openCodexCli(CODEX_SELECTED_MODEL, !!st.applied);
-        if (res.ok && !st.applied) {
-          toast("Codex CLI opened with default settings.", "good");
-          openBtn.disabled = false;
-          return;
-        }
-        if (res.ok) toast("Codex CLI Cizi Code profiliyle başlatıldı.", "good");
-        else toast(clientMessage(res.error || "Codex CLI başlatılamadı."), "bad");
-        openBtn.disabled = false;
-      });
-      actions.appendChild(openBtn);
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.className = "ghost tiny-btn danger";
-      removeBtn.dataset.cliId = "codex-cli.purge";
-      removeBtn.dataset.cliLabel = "Kökten Kaldır Codex CLI";
-      removeBtn.textContent = "Kökten Kaldır";
-      removeBtn.title = "Yalnızca bağımsız Codex CLI kurulumunu ve Cizi Code profilini kaldırır";
-      removeBtn.addEventListener("click", async () => {
-        if (!confirm("Bağımsız Codex CLI ve Cizi Code profili kaldırılacak. Codex Desktop ve ChatGPT korunur. Devam edilsin mi?")) return;
-        removeBtn.disabled = true;
-        openBtn.disabled = true;
-        removeBtn.textContent = "Kaldırılıyor...";
-        clog("info", "Codex CLI kökten kaldırılıyor");
-        const res = await cizi.uninstallCodexCli();
-        if (res.ok) {
-          toast("Codex CLI kaldırıldı; masaüstü uygulamaları korunuyor.", "good");
-          clog("success", "Codex CLI kökten kaldırıldı");
-        } else {
-          toast(clientMessage(res.error || "Kökten kaldırma kısmen tamamlandı."), "bad");
-          clog("warning", "Codex CLI kökten kaldırma kısmen tamamlandı");
-        }
-        await loadTemplatesAndTools();
-      });
-      actions.appendChild(removeBtn);
-    }
     if (st.id === CLAUDE_CODE_CLI_TOOL_ID && CLAUDE_CLI_STATUS.installed) {
       const openBtn = document.createElement("button");
       openBtn.type = "button";
@@ -694,17 +947,14 @@ function renderTools(statuses) {
       cb.disabled = true;
       clog("info", `${st.name}: ${cb.checked ? "connect" : "restore"}`, { tool: st.id });
       if (cb.checked) {
-        if (st.id !== CODEX_CLI_TOOL_ID && !defaultModel) {
+        if (!defaultModel) {
           toast("No model is available for this key.", "bad");
           cb.checked = false;
           cb.disabled = false;
           return;
         }
-        const modelNames = st.id === CODEX_CLI_TOOL_ID
-          ? codexModelIds(models)
-          : models.map((m) => (typeof m === "string" ? m : m.name)).filter(Boolean);
-        const selectedModel = st.id === CODEX_CLI_TOOL_ID ? CODEX_SELECTED_MODEL : defaultModel;
-        const res = await cizi.applyTool(st.id, { model: selectedModel, models: modelNames });
+        const modelNames = models.map((m) => (typeof m === "string" ? m : m.name)).filter(Boolean);
+        const res = await cizi.applyTool(st.id, { model: defaultModel, models: modelNames });
         if (res.ok) toast(`${st.name} connected.`, "good");
         else {
           toast(clientMessage(res.error || "Could not connect this tool."), "bad");
@@ -864,6 +1114,7 @@ $("update-install").addEventListener("click", async () => {
 cizi.onUpdateState(renderUpdateState);
 if (cizi.onClaudeCodeInstallState) cizi.onClaudeCodeInstallState(updateClaudeInstallFeedback);
 if (cizi.onCodexCliInstallState) cizi.onCodexCliInstallState(updateCodexInstallFeedback);
+if (cizi.onCodexDesktopInstallState) cizi.onCodexDesktopInstallState(updateCodexDesktopInstallFeedback);
 if (window.ciziCliUi?.handle && cizi.onCliRequest && cizi.cliReady) {
   cizi.onCliRequest((request) => window.ciziCliUi.handle(request));
   cizi.cliReady();

@@ -10,16 +10,14 @@
   "scripts": {
     "start": "electron .",
     "cli": "node scripts/cizi-cli.cjs",
-    "test": "node test-cli-contract.cjs && node test-codex-cli.cjs && node test-tools.cjs",
+    "test": "node test-cli-contract.cjs && node test-codex-cli.cjs && node test-codex-config.cjs && node test-codex-desktop.cjs && node test-tools.cjs",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
     "dist:linux": "electron-builder --linux"
   },
-  "dependencies": {
-    "confbox": "^0.2.4"
-  },
   "devDependencies": {
+    "confbox": "^0.2.4",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
     "playwright-core": "^1.60.0"

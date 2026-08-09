@@ -128,6 +128,12 @@ button.ghost:hover { background: rgba(255, 252, 232, 0.8); }
 .tool-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .tool-install-actions { min-width: 280px; flex-direction: column; align-items: stretch; gap: 7px; }
 .tool-actions-buttons { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+/* Codex: one switch above the two products that share its config file. */
+.codex-row { flex-wrap: wrap; }
+.codex-products { flex-basis: 100%; display: flex; flex-direction: column; gap: 8px; margin-top: 4px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.codex-product { display: flex; align-items: center; gap: 12px; padding: 8px 10px; background: var(--card-2); border: 1px solid var(--border); border-radius: var(--radius); }
+.codex-product-info { flex: 1; min-width: 0; }
+.codex-product-name { font-weight: 600; font-size: 13px; }
 .cli-install-activity { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: rgba(255, 252, 232, 0.48); }
 .cli-activity-head, .cli-operation-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .cli-activity-head { font-size: 13px; }

@@ -27,6 +27,10 @@ npm run cli -- screen
 npm run cli -- list
 npm run cli -- click update-check
 npm run cli -- switch tool.claude-code-cli.switch off
+npm run cli -- switch tool.codex.switch on
+npm run cli -- select tool.codex.model gpt-5.6-terra
+npm run cli -- click codex-desktop.install
+npm run cli -- click codex-desktop.purge
 npm run cli -- select period-select 7d
 ```
 
@@ -38,15 +42,37 @@ and `Go to official site`. The installer button downloads and runs Anthropic's
 official installer script, reports download and installer activity, and
 re-checks the local `claude` command before enabling the configuration switch.
 
-Codex CLI follows the same desktop and renderer-CLI flow. Cizi Code detects an
-existing standalone or npm installation, offers `İndir ve Kur` with the
-official OpenAI installer and exposes step-by-step activity. Once installed,
-the Codex switch writes only `~/.codex/cizicode.config.toml`; it keeps the
-user's primary Codex configuration untouched and stores the Cizi API key only
-as `experimental_bearer_token` in that provider profile. The `Aç` button runs
-the `cizicode` profile. `Kökten Kaldır` only removes the verified standalone
-CLI paths, the Cizi Code profile, and its exact User PATH entry; Codex Desktop
-and ChatGPT Desktop are preserved.
+### Codex: ChatGPT Desktop + Codex CLI, tek switch
+
+Windows'ta iki yerel Codex ürünü vardır ve **ikisi de aynı çekirdeği** çalıştırır:
+
+| | Ürün | Kaynak |
+|---|---|---|
+| ChatGPT Desktop | `OpenAI.Codex` MSIX paketi (içindeki **Codex** bölümü) | Microsoft Store, `9PLM9XGG6VKS` |
+| Codex CLI | bağımsız `codex.exe` | resmî OpenAI yükleyicisi |
+
+Her ikisi de `%USERPROFILE%\.codex\config.toml` dosyasını okur, bu yüzden Cizi
+Code **tek bir switch** ile ikisini birden bağlar. Switch açıldığında yalnız üç
+şey yazılır — `model`, `model_provider` ve `[model_providers.cizicode]` bloğu.
+Dosyanın geri kalanı (Desktop'ın kendi `notify`, `mcp_servers`, `plugins`,
+`projects` ayarları dahil) bayt bayt korunur; her yazma öncesi zaman damgalı
+yedek alınır, sonrasında dosya geri okunup doğrulanır. API anahtarı doğrudan
+`experimental_bearer_token` alanına yazılır — ortam değişkeni veya `.env`
+kullanılmaz ve `auth.json` dosyasına dokunulmaz.
+
+Model değiştirmek sağlayıcıyı değiştirmez: yalnız `model` satırı güncellenir.
+ChatGPT Desktop kuruluysa arayüz, değişikliğin geçerli olması için uygulamayı
+yeniden başlatıp yeni bir Codex sohbeti açmayı hatırlatır. Switch kapatıldığında
+yalnız Cizi Code'un eklediği satırlar geri alınır ve `model` eski değerine döner.
+
+Kurulum ve kaldırma her ürün için ayrıdır. ChatGPT Desktop resmî Microsoft Store
+kaynağından kurulur (indirme ve kurulum ilerlemesi canlı gösterilir) ve
+`Remove-AppxPackage` ile kaldırılır — `WindowsApps` klasörüne elle dokunulmaz.
+**Kaldırmadan önce Cizi Code hangi yolların silineceğini, hangilerinin
+korunacağını gösterir:** diğer Codex ürünü hâlâ kuruluysa ortak `~/.codex`
+klasörüne ve ayar dosyasına dokunulmaz; yalnız o ürüne ait yollar silinir. Ortak
+klasör ancak geriye başka Codex ürünü kalmadığında ve kullanıcı bunu onayladığında
+temizlenir. Bu karar arayüzden değil, ana süreçte yeniden tespit edilerek verilir.
 
 ## Paketleme
 ```bash
@@ -59,7 +85,10 @@ npm run dist:linux  # Linux AppImage
 ## Mimari
 - `src/main/` — Electron ana süreç. `apiClient.js` yalnızca holder-scoped uçları çağırır (`/api/me`, `/api/usage/me`, `/api/cli-tools/templates`). Backend'e erişim yoktur.
 - `src/main/tools/registry.js` — her araç için yerel config şekli (gateway'in kendi cli-tools mantığından port edildi; kullanıcının makinesine yazar).
-- `src/main/tools/backup.js` — config dosyalarının tam yedeği; geri alımda **aynen** geri yükler.
+- `src/main/tools/backup.js` — config dosyalarının tam yedeği; geri alımda **aynen** geri yükler. Ortak Codex config'i gibi, bağlıyken sahibi tarafından yazılmaya devam eden dosyalarda yedek geri yükleme yerine yalnız kendi anahtarlarını geri alan cerrahi yol kullanılır.
+- `src/main/codexPaths.js` — Desktop'a, CLI'ye ve ikisine birden ait yolların haritası; kaldırma planı buradan üretilir.
+- `src/main/codexConfigFile.js` — ortak `~/.codex/config.toml` üzerinde cerrahi düzenleme, yedekleme ve yazma sonrası doğrulama.
+- `src/main/codexDesktop.js` — ChatGPT Desktop tespiti, Microsoft Store kurulumu ve `Remove-AppxPackage` ile kaldırma.
 - `src/renderer/` — Cizi Code temalı arayüz (vanilla JS, framework yok).
 
 ## Güvenlik

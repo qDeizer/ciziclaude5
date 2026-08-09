@@ -48,6 +48,30 @@ function takeSnapshot(toolId, filePaths) {
   log.info("backup", `Snapshot taken for ${toolId} (${files.filter((f) => f.existed).length}/${files.length} files existed)`);
 }
 
+// Reads the captured pre-Cizi content without restoring it. Tools that revert
+// surgically use this to recover the values they overwrote instead of putting
+// a whole stale file back over changes the user's own app has made since.
+function readSnapshot(toolId) {
+  if (!hasSnapshot(toolId)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(snapshotPath(toolId), "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function snapshotContent(toolId, filePath) {
+  const snap = readSnapshot(toolId);
+  const match = (snap?.files || []).find((f) => f.path === filePath);
+  return match?.existed ? match.content : null;
+}
+
+function dropSnapshot(toolId) {
+  if (!hasSnapshot(toolId)) return false;
+  fs.rmSync(snapshotPath(toolId), { force: true });
+  return true;
+}
+
 function restoreSnapshot(toolId) {
   if (!hasSnapshot(toolId)) return { restored: false, reason: "no-snapshot" };
   const snap = JSON.parse(fs.readFileSync(snapshotPath(toolId), "utf-8"));
@@ -67,4 +91,4 @@ function restoreSnapshot(toolId) {
   return { restored: true, files: (snap.files || []).map((f) => f.path) };
 }
 
-module.exports = { hasSnapshot, takeSnapshot, restoreSnapshot, snapshotPath, backupDir };
+module.exports = { hasSnapshot, takeSnapshot, restoreSnapshot, readSnapshot, snapshotContent, dropSnapshot, snapshotPath, backupDir };
