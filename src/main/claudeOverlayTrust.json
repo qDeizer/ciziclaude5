@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "allowedSignerSubjects": [
+    "CN=Claude Translate Toggle Test"
+  ],
+  "allowedCertificateThumbprints": [
+    "0312B13B486AEE6E1267E5D77C24247ABB5F54A1"
+  ],
+  "portableQaOnly": true
+}

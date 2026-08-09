@@ -32,6 +32,20 @@ contextBridge.exposeInMainWorld("cizi", {
     return () => ipcRenderer.removeListener("cizi:codexCliInstallState", listener);
   },
 
+  getClaudeState: () => ipcRenderer.invoke("cizi:getClaudeState"),
+  getClaudeProgress: () => ipcRenderer.invoke("cizi:getClaudeProgress"),
+  connectClaude: (model, models) => ipcRenderer.invoke("cizi:connectClaude", { model, models }),
+  disconnectClaude: () => ipcRenderer.invoke("cizi:disconnectClaude"),
+  installClaudeDesktop: () => ipcRenderer.invoke("cizi:installClaudeDesktop"),
+  launchClaudeDesktop: () => ipcRenderer.invoke("cizi:launchClaudeDesktop"),
+  repairClaudeDesktop: () => ipcRenderer.invoke("cizi:repairClaudeDesktop"),
+  stopClaudeDesktop: () => ipcRenderer.invoke("cizi:stopClaudeDesktop"),
+  onClaudeProgress: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("cizi:claudeProgress", listener);
+    return () => ipcRenderer.removeListener("cizi:claudeProgress", listener);
+  },
+
   getCodexDesktopStatus: () => ipcRenderer.invoke("cizi:getCodexDesktopStatus"),
   installCodexDesktop: () => ipcRenderer.invoke("cizi:installCodexDesktop"),
   openCodexDesktop: () => ipcRenderer.invoke("cizi:openCodexDesktop"),

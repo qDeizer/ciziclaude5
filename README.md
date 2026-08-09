@@ -82,6 +82,28 @@ npm run dist:linux  # Linux AppImage
 ```
 > Paketleme için `assets/icon.*` ekleyin (yoksa varsayılan Electron ikonu kullanılır).
 
+### Claude: Claude Code CLI + Claude Desktop, tek switch
+
+Claude tarafında da tek switch vardır, ama Codex'ten farklı çalışır: CLI ve
+Desktop **aynı config dosyasını paylaşmaz**. CLI `~/.claude/settings.json` ile
+bağlanır; Desktop ise kendi yönetilen yapılandırma yüzeyine (policy/config
+library) ek olarak imzalı bir credential helper ve yeni sohbet başlatma
+mekanizması kullanır. Claude Desktop modülü ciziClaude4'ten **olduğu gibi**
+taşındı — kendi işlem/geri alma döngüsü, baseline yedeği, otomatik güncelleme
+onarım görevi ve Türkçe arayüz paketi dahil.
+
+Koordinatör katmanı iki ürünü tek anahtar altında birleştirir:
+- **Bağlarken** önce CLI bağlanır; Desktop işlemi başarısız olursa CLI ayarı
+  geri alınır, böylece yarım bağlantı oluşmaz.
+- **Kapatırken** önce Desktop geri alınır; başarısız olursa CLI yine geri
+  alınır — iki taraf birbirinden habersiz bağlı kalamaz.
+- Desktop güncellemeleri ayarları ezebildiği için arayüzde **Onar** eylemi
+  vardır; tek tıkla Cizi Code ayarları yeniden uygulanır.
+
+Yardımcı dosyalar da taşındı: `src/main/bin/` içindeki
+`CiziClaudeCredentialHelper.exe`, `CiziClaudeRuntimeHost.exe` (C# kaynaklarıyla)
+ve `gateway-branding.js`, ayrıca `claudeOverlayTrust.json`.
+
 ## Mimari
 - `src/main/` — Electron ana süreç. `apiClient.js` yalnızca holder-scoped uçları çağırır (`/api/me`, `/api/usage/me`, `/api/cli-tools/templates`). Backend'e erişim yoktur.
 - `src/main/tools/registry.js` — her araç için yerel config şekli (gateway'in kendi cli-tools mantığından port edildi; kullanıcının makinesine yazar).
@@ -89,6 +111,8 @@ npm run dist:linux  # Linux AppImage
 - `src/main/codexPaths.js` — Desktop'a, CLI'ye ve ikisine birden ait yolların haritası; kaldırma planı buradan üretilir.
 - `src/main/codexConfigFile.js` — ortak `~/.codex/config.toml` üzerinde cerrahi düzenleme, yedekleme ve yazma sonrası doğrulama.
 - `src/main/codexDesktop.js` — ChatGPT Desktop tespiti, Microsoft Store kurulumu ve `Remove-AppxPackage` ile kaldırma.
+- `src/main/claudeCoordinator.js` — Claude Code CLI + Claude Desktop tek switch koordinatörü (sıralı bağlama, başarısızlıkta geri alma).
+- `src/main/tools/claude*.js` — ciziClaude4'ten taşınan Claude Desktop motoru: yaşam döngüsü, kurulum, kimlik doğrulama yardımcısı, politika/config library yüzeyi, Türkçe arayüz paketi, onarım görevi.
 - `src/renderer/` — Cizi Code temalı arayüz (vanilla JS, framework yok).
 
 ## Güvenlik

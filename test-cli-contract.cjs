@@ -12,6 +12,9 @@ const renderer = read("src/renderer/renderer.js");
 const cliUi = read("src/renderer/cliUi.js");
 const cli = read("scripts/cizi-cli.cjs");
 const codexCli = read("src/main/codexCli.js");
+const claudeCoordinator = read("src/main/claudeCoordinator.js");
+const claudeDesktop = read("src/main/tools/claudeDesktop.js");
+const claudeLifecycle = read("src/main/tools/claudeLifecycle.js");
 
 assert(main.includes('require("./cliBridge")'), "main must compose the CLI bridge");
 assert(main.includes('ipcMain.on("cizi:cliResponse"'), "main must accept renderer CLI replies");
@@ -61,6 +64,28 @@ assert(codexConfigFile.includes("fs.writeFileSync(target, previousText"), "a fai
 // depend on one; the tests parse the results with a real TOML parser instead.
 assert(!/require\(["']confbox["']\)/.test(codexConfigFile), "the main process must not require the ES-only TOML package");
 assert(!codexCli.includes('"--profile"'), "a CLI-only profile cannot configure ChatGPT Desktop and must not be passed to Codex");
+
+// Claude: one switch over Claude Code CLI + Claude Desktop, with the desktop's
+// own transaction engine transplanted and the coordinator as the only glue.
+assert(main.includes("cizi:getClaudeState"), "main must expose the combined Claude state");
+assert(main.includes("cizi:connectClaude") && main.includes("cizi:disconnectClaude"), "main must expose the single Claude connect/disconnect switch");
+assert(main.includes("cizi:installClaudeDesktop"), "main must expose Claude Desktop installation");
+assert(main.includes("cizi:launchClaudeDesktop") && main.includes("cizi:stopClaudeDesktop"), "main must expose Claude Desktop launch and stop");
+assert(main.includes("cizi:repairClaudeDesktop"), "main must expose Claude Desktop repair");
+assert(preload.includes("getClaudeState") && preload.includes("connectClaude") && preload.includes("disconnectClaude"), "preload must expose the Claude switch");
+assert(preload.includes("installClaudeDesktop") && preload.includes("repairClaudeDesktop"), "preload must expose the Desktop install and repair actions");
+assert(preload.includes("onClaudeProgress"), "preload must expose Claude Desktop progress events");
+assert(renderer.includes('idPrefix: "claude-code-cli"'), "renderer must expose the Claude Code CLI controls");
+assert(renderer.includes("claude-desktop.install"), "renderer must expose the Claude Desktop install control");
+assert(renderer.includes("claude-desktop.repair"), "renderer must expose the Claude Desktop repair control");
+assert(renderer.includes('cb.dataset.cliId = "tool.claude.switch"'), "renderer must expose one Claude configuration switch");
+assert(renderer.includes("claude-desktop-install-activity"), "renderer must host the Claude Desktop install activity panel");
+assert(renderer.includes("updateClaudeProgress"), "renderer must map Claude Desktop progress phases onto the activity panel");
+assert(claudeCoordinator.includes("connect") && claudeCoordinator.includes("disconnect"), "the coordinator must implement both halves of the switch");
+assert(claudeCoordinator.includes("toolManager.revertTool"), "a desktop failure must roll the CLI half back");
+assert(claudeCoordinator.includes("applyTool(CLAUDE_CODE_TOOL_ID"), "the coordinator must configure the CLI through the same service the UI uses");
+assert(claudeDesktop.includes("createClaudeDesktopBackend"), "the transplanted Desktop engine must be present");
+assert(claudeLifecycle.includes("installClaudeDesktop"), "the transplanted lifecycle must provide Desktop installation");
 assert(codexCli.includes("https://chatgpt.com/codex/install.ps1"), "Codex installer must use the official Windows installer URL");
 assert(codexCli.includes('percent: null, message: "Downloading the official Codex installer..."'), "Codex installer must mark an unknown download percentage as indeterminate");
 assert(renderer.includes('stepPercent > 0 || rawActive?.status === "done"'), "Codex activity must not present an unknown installer percentage as 0%");

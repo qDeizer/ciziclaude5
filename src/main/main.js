@@ -12,6 +12,9 @@ const claudeUninstall = require("./claudeUninstall");
 const { createCodexCliService } = require("./codexCli");
 const { createCodexDesktopService } = require("./codexDesktop");
 const codexConfig = require("./codexConfigFile");
+const claudeDesktopBackend = require("./tools/claudeDesktop");
+const claudeLifecycle = require("./tools/claudeLifecycle");
+const { createClaudeCoordinator } = require("./claudeCoordinator");
 const log = require("./logger");
 const { CliBridge } = require("./cliBridge");
 
@@ -48,6 +51,22 @@ const codexDesktop = createCodexDesktopService({
   userDataPath: app.getPath("userData"),
   log,
   onInstallState: (state) => broadcast("cizi:codexDesktopInstallState", state),
+});
+// Claude Desktop's own transaction/rollback engine is transplanted as-is; the
+// coordinator is the only thing that knows the CLI and the desktop app are one
+// switch to the user.
+let claudeProgressState = { phase: "idle", message: "", details: null };
+const claude = createClaudeCoordinator({
+  claudeDesktop: claudeDesktopBackend,
+  lifecycle: claudeLifecycle,
+  toolManager: toolMgr,
+  detectCli: () => detectClaudeCodeCli(),
+  installCli: () => installClaudeCodeCli(),
+  log,
+  onDesktopProgress: (state) => {
+    claudeProgressState = { ...state, at: new Date().toISOString() };
+    broadcast("cizi:claudeProgress", claudeProgressState);
+  },
 });
 
 function shouldBlockDevToolsShortcut(input) {
@@ -811,6 +830,31 @@ ipcMain.handle("cizi:openCodexCliSite", wrap("openCodexCliSite", async () => {
   await shell.openExternal(codexCli.officialSiteUrl);
   return { opened: true, url: codexCli.officialSiteUrl };
 }));
+
+// Claude: one switch over Claude Code CLI + Claude Desktop.
+ipcMain.handle("cizi:getClaudeState", wrap("getClaudeState", async () => claude.getState(api.TOOL_BASE_URL)));
+ipcMain.handle("cizi:getClaudeProgress", wrap("getClaudeProgress", async () => claudeProgressState));
+
+ipcMain.handle("cizi:connectClaude", wrap("connectClaude", async ({ model, models } = {}) => {
+  const s = requireSession();
+  if (!model) throw new Error("Önce bir model seçin.");
+  const values = {
+    base: api.TOOL_BASE_URL,
+    apiKey: s.apiKey,
+    model,
+    opus: model,
+    sonnet: model,
+    haiku: model,
+    models: Array.isArray(models) && models.length ? models : [model],
+  };
+  return claude.connect(values);
+}));
+
+ipcMain.handle("cizi:disconnectClaude", wrap("disconnectClaude", async () => claude.disconnect(api.TOOL_BASE_URL)));
+ipcMain.handle("cizi:installClaudeDesktop", wrap("installClaudeDesktop", async () => claude.installDesktop()));
+ipcMain.handle("cizi:launchClaudeDesktop", wrap("launchClaudeDesktop", async () => claude.launchDesktop()));
+ipcMain.handle("cizi:repairClaudeDesktop", wrap("repairClaudeDesktop", async () => claude.repairDesktop()));
+ipcMain.handle("cizi:stopClaudeDesktop", wrap("stopClaudeDesktop", async () => claude.stopDesktop()));
 
 ipcMain.handle("cizi:getCodexDesktopStatus", wrap("getCodexDesktopStatus", async () => codexDesktop.detect()));
 ipcMain.handle("cizi:installCodexDesktop", wrap("installCodexDesktop", async () => codexDesktop.install()));

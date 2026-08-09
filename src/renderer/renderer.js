@@ -8,6 +8,9 @@ var cizi = window.cizi;
 var TEMPLATES = null;
 var CLAUDE_CLI_STATUS = { installed: false, command: null, version: null };
 var CLAUDE_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
+var CLAUDE_STATE = { cli: { installed: false, applied: false }, desktop: { installed: false, applied: false }, connected: false, installedProducts: [] };
+var CLAUDE_PROGRESS = { phase: "idle", message: "", details: null };
+var CLAUDE_SELECTED_MODEL = null;
 var CODEX_CLI_STATUS = { installed: false, command: null, version: null };
 var CODEX_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
 var CODEX_DESKTOP_STATUS = { installed: false, version: null, packageFullName: null };
@@ -21,6 +24,7 @@ const CLAUDE_CODE_CLI_TOOL_ID = "claude-code";
 const CLAUDE_CODE_CLI_NAME = "Claude Code CLI";
 const CODEX_CLI_TOOL_ID = "codex";
 const CODEX_CLI_NAME = "Codex CLI";
+const CLAUDE_DESKTOP_NAME = "Claude Desktop";
 const CODEX_DESKTOP_NAME = "ChatGPT Desktop";
 var FIRST_RELEASE_TOOLS = [CLAUDE_CODE_CLI_TOOL_ID, CODEX_CLI_TOOL_ID];
 
@@ -262,8 +266,12 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 async function loadTemplatesAndTools() {
-  const [toolsRes, claudeRes, codexRes] = await Promise.all([cizi.listTools(), cizi.getClaudeCodeStatus(), cizi.getCodexState()]);
-  CLAUDE_CLI_STATUS = claudeRes?.ok ? (claudeRes.data || { installed: false }) : { installed: false };
+  const [toolsRes, claudeRes, codexRes] = await Promise.all([cizi.listTools(), cizi.getClaudeState(), cizi.getCodexState()]);
+  // One call reports both Claude products and whether the pair is connected.
+  CLAUDE_STATE = claudeRes?.ok
+    ? (claudeRes.data || CLAUDE_STATE)
+    : { cli: { installed: false, applied: false }, desktop: { installed: false, applied: false }, connected: false, installedProducts: [] };
+  CLAUDE_CLI_STATUS = CLAUDE_STATE.cli || { installed: false };
   // One call reports both Codex products and the shared config they read.
   const codex = codexRes?.ok ? (codexRes.data || {}) : {};
   CODEX_CLI_STATUS = codex.cli || { installed: false };
@@ -303,9 +311,55 @@ function updateCodexDesktopInstallFeedback(state) {
 
 const INSTALL_ACTIVITY_TARGETS = {
   claude: { box: "claude-cli-install-activity", name: CLAUDE_CODE_CLI_NAME },
+  "claude-desktop": { box: "claude-desktop-install-activity", name: CLAUDE_DESKTOP_NAME },
   codex: { box: "codex-cli-install-activity", name: CODEX_CLI_NAME },
   "codex-desktop": { box: "codex-desktop-install-activity", name: CODEX_DESKTOP_NAME },
 };
+
+// Claude Desktop reports progress as (phase, message, details) from its own
+// transplanted engine. This maps that onto the activity panel the other tools
+// already use, so every long operation looks the same to the user.
+function updateClaudeProgress(progress) {
+  CLAUDE_PROGRESS = progress || { phase: "idle", message: "", details: null };
+  const phase = String(CLAUDE_PROGRESS.phase || "");
+  const active = Boolean(phase) && phase !== "idle" && phase !== "complete" && Boolean(CLAUDE_PROGRESS.message);
+  const percent = CLAUDE_PROGRESS.details && Number.isFinite(Number(CLAUDE_PROGRESS.details.percent))
+    ? Number(CLAUDE_PROGRESS.details.percent)
+    : null;
+  const failed = phase === "error";
+  renderCliInstallActivity({
+    status: failed ? "error" : phase === "complete" ? "installed" : active ? "installing" : "idle",
+    phase,
+    percent: failed ? null : phase === "complete" ? 100 : percent,
+    message: CLAUDE_PROGRESS.message || "",
+    operations: active || failed || phase === "complete"
+      ? [{
+        id: "claude-desktop",
+        label: claudePhaseLabel(phase),
+        status: failed ? "error" : phase === "complete" ? "done" : "running",
+        percent: failed ? null : phase === "complete" ? 100 : percent,
+        detail: CLAUDE_PROGRESS.message || "",
+      }]
+      : [],
+  }, "claude-desktop");
+}
+
+function claudePhaseLabel(phase) {
+  const labels = {
+    starting: "Kuruluma hazırlanılıyor",
+    downloading: "Claude Desktop indiriliyor",
+    installing: "Claude Desktop kuruluyor",
+    verifying: "Kurulum doğrulanıyor",
+    configuring: "Ayarlar uygulanıyor",
+    authenticating: "Kimlik doğrulama hazırlanıyor",
+    translating: "Arayüz paketi kontrol ediliyor",
+    restoring: "Önceki ayarlara dönülüyor",
+    repairing: "Ayarlar yenileniyor",
+    complete: "Tamamlandı",
+    error: "İşlem tamamlanamadı",
+  };
+  return labels[phase] || "Claude Desktop işlemi";
+}
 
 function renderCliInstallActivity(state, cli) {
   const target = INSTALL_ACTIVITY_TARGETS[cli] || INSTALL_ACTIVITY_TARGETS.claude;
@@ -397,67 +451,6 @@ function renderCliInstallActivity(state, cli) {
   detail.textContent = detailText;
   single.appendChild(detail);
   box.appendChild(single);
-}
-
-function renderClaudeInstallActions(row, info) {
-  const actions = document.createElement("div");
-  actions.className = "tool-actions tool-install-actions";
-
-  const buttons = document.createElement("div");
-  buttons.className = "tool-actions-buttons";
-
-  const install = document.createElement("button");
-  install.type = "button";
-  install.className = "primary tiny-btn";
-  install.dataset.cliId = "claude-code-cli.install";
-  install.dataset.cliLabel = "Install Claude Code CLI";
-  install.dataset.cliAwait = "long";
-  install.dataset.cliAwaitTimeout = String(10 * 60 * 1000);
-  install.textContent = "Download & Install";
-
-  const site = document.createElement("button");
-  site.type = "button";
-  site.className = "ghost tiny-btn";
-  site.dataset.cliId = "claude-code-cli.official-site";
-  site.dataset.cliLabel = "Open official Claude Code site";
-  site.textContent = "Go to official site";
-  install.addEventListener("click", async () => {
-    install.disabled = true;
-    site.disabled = true;
-    install.textContent = "Installing...";
-    updateClaudeInstallFeedback({ status: "starting", percent: 0, message: "Starting the official Claude Code installer..." });
-    let res;
-    try {
-      res = await cizi.installClaudeCode();
-    } catch (error) {
-      res = { ok: false, error: error?.message || "Claude Code CLI could not be installed." };
-    }
-    if (res.ok && res.data?.installed) {
-      CLAUDE_CLI_STATUS = res.data;
-      updateClaudeInstallFeedback({ status: "installed", percent: 100, message: "Claude Code CLI is installed." });
-      toast("Claude Code CLI installed.", "good");
-      await loadTemplatesAndTools();
-      setTimeout(() => {
-        updateClaudeInstallFeedback({ status: "idle", percent: 0, message: "", operations: [] });
-      }, 2500);
-    } else {
-      install.disabled = false;
-      site.disabled = false;
-      install.textContent = "Download & Install";
-      updateClaudeInstallFeedback({ status: "error", message: res.error || "Claude Code CLI could not be installed." });
-      toast(clientMessage(res.error || "Claude Code CLI could not be installed."), "bad");
-    }
-  });
-  site.addEventListener("click", async () => {
-    const res = await cizi.openClaudeCodeSite();
-    if (!res.ok) toast(clientMessage(res.error || "Official site could not be opened."), "bad");
-  });
-
-  buttons.appendChild(install);
-  buttons.appendChild(site);
-  actions.appendChild(buttons);
-  row.appendChild(info);
-  row.appendChild(actions);
 }
 
 function button({ label, className, cliId, cliLabel, title, onClick, long }) {
@@ -559,6 +552,297 @@ function codexProductBlock({ name, idPrefix, status, detail, installLabel, onIns
   block.appendChild(head);
   block.appendChild(actions);
   void feedback;
+  return block;
+}
+
+// The Claude row. Unlike Codex, the two Claude products share no config file:
+// the CLI is configured through ~/.claude/settings.json and the desktop app
+// through its own managed surface. The single switch is honest about that — it
+// connects both as one unit, and the main process rolls the first back if the
+// second refuses.
+function renderClaudeRow(st, models) {
+  const row = document.createElement("div");
+  row.className = "tool-row codex-row";
+
+  const cli = CLAUDE_STATE.cli || { installed: false };
+  const desktop = CLAUDE_STATE.desktop || { installed: false };
+  const anyInstalled = Boolean(cli.installed || desktop.installed);
+  const connected = CLAUDE_STATE.connected === true;
+
+  const info = document.createElement("div");
+  info.className = "tool-info";
+  const name = document.createElement("div");
+  name.className = "tool-name";
+  name.textContent = "Claude (Code CLI + Desktop)";
+  const sub = document.createElement("div");
+  sub.className = "tool-sub";
+  sub.textContent = CLAUDE_STATE.blockReason
+    ? CLAUDE_STATE.blockReason
+    : connected
+      ? "Bağlı — tek anahtar kurulu olan Claude ürünlerini birlikte yönetiyor"
+      : CLAUDE_STATE.partial
+        ? "Yarım bağlantı algılandı — anahtarı kapatıp yeniden açın"
+        : anyInstalled
+          ? "Tek anahtar Claude Code CLI ve Claude Desktop'ı birlikte Cizi Code'a bağlar"
+          : "Bağlamak için önce en az bir Claude ürünü kurun";
+  info.appendChild(name);
+  info.appendChild(sub);
+
+  const actions = document.createElement("div");
+  actions.className = "tool-actions";
+
+  const modelSelect = document.createElement("select");
+  modelSelect.className = "tool-model";
+  modelSelect.dataset.cliId = "tool.claude.model";
+  modelSelect.dataset.cliLabel = "Claude modeli";
+  const names = (models || []).map((m) => (typeof m === "string" ? m : m?.name)).filter(Boolean);
+  const selected = CLAUDE_SELECTED_MODEL && names.includes(CLAUDE_SELECTED_MODEL)
+    ? CLAUDE_SELECTED_MODEL
+    : getDefaultModel(models);
+  CLAUDE_SELECTED_MODEL = selected;
+  for (const modelId of names.length ? names : [selected].filter(Boolean)) {
+    const option = document.createElement("option");
+    option.value = modelId;
+    option.textContent = modelId;
+    option.selected = modelId === selected;
+    modelSelect.appendChild(option);
+  }
+  // Claude Desktop pins one model at a time, so changing it means reconnecting.
+  modelSelect.disabled = connected;
+  modelSelect.title = connected ? "Modeli değiştirmek için önce bağlantıyı kapatın" : "";
+  modelSelect.addEventListener("change", () => { CLAUDE_SELECTED_MODEL = modelSelect.value; });
+  actions.appendChild(modelSelect);
+
+  const sw = document.createElement("label");
+  sw.className = "switch";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.dataset.cliId = "tool.claude.switch";
+  cb.dataset.cliLabel = "Claude bağlantısı";
+  cb.dataset.cliAwait = "long";
+  cb.dataset.cliAwaitTimeout = String(10 * 60 * 1000);
+  cb.checked = connected;
+  cb.disabled = !anyInstalled || CLAUDE_STATE.canConnect === false;
+  if (!anyInstalled) sw.title = "Önce Claude Code CLI veya Claude Desktop kurun";
+  const slider = document.createElement("span");
+  slider.className = "slider";
+  sw.appendChild(cb);
+  sw.appendChild(slider);
+  actions.appendChild(sw);
+
+  cb.addEventListener("change", async () => {
+    cb.disabled = true;
+    const turningOn = cb.checked;
+    clog("info", `Claude: ${turningOn ? "bağlanıyor" : "geri alınıyor"}`, { tool: st.id });
+    let res;
+    if (turningOn) {
+      if (!CLAUDE_SELECTED_MODEL) {
+        toast("Bu anahtar için model bulunamadı.", "bad");
+        cb.checked = false;
+        cb.disabled = false;
+        return;
+      }
+      res = await cizi.connectClaude(CLAUDE_SELECTED_MODEL, names);
+      if (res.ok) {
+        const products = res.data?.connectedProducts || [];
+        toast(products.includes("desktop")
+          ? "Claude bağlandı. Claude Desktop yeni ayarlarla açıldı."
+          : "Claude Code CLI bağlandı.", "good");
+      } else {
+        toast(clientMessage(res.error || "Claude bağlanamadı."), "bad");
+        cb.checked = false;
+      }
+    } else {
+      res = await cizi.disconnectClaude();
+      if (res.ok) toast("Claude bağlantısı kaldırıldı; önceki ayarlarınız geri yüklendi.", "good");
+      else {
+        toast(clientMessage(res.error || "Claude bağlantısı geri alınamadı."), "bad");
+        cb.checked = true;
+      }
+    }
+    cb.disabled = false;
+    await loadTemplatesAndTools();
+    loadLogs();
+  });
+
+  row.appendChild(info);
+  row.appendChild(actions);
+
+  const products = document.createElement("div");
+  products.className = "codex-products";
+
+  products.appendChild(codexProductBlock({
+    name: CLAUDE_CODE_CLI_NAME,
+    idPrefix: "claude-code-cli",
+    status: cli,
+    detail: cli.installed
+      ? `Kurulu · ${cli.version || cli.command}`
+      : "Kurulu değil · resmî yükleyiciyle kurulur",
+    installLabel: "İndir ve Kur",
+    siteLabel: "Resmî site",
+    onInstall: async (event) => {
+      const target = event.currentTarget;
+      target.disabled = true;
+      target.textContent = "Kuruluyor...";
+      updateClaudeInstallFeedback({ status: "starting", percent: 0, message: "Resmî Claude Code yükleyicisi başlatılıyor...", operations: [] });
+      let res;
+      try { res = await cizi.installClaudeCode(); } catch (error) { res = { ok: false, error: error?.message || "Claude Code CLI kurulamadı." }; }
+      if (res.ok && res.data?.installed) {
+        updateClaudeInstallFeedback({ status: "installed", percent: 100, message: "Claude Code CLI kuruldu." });
+        toast("Claude Code CLI kuruldu.", "good");
+        await loadTemplatesAndTools();
+        setTimeout(() => updateClaudeInstallFeedback({ status: "idle", percent: 0, message: "", operations: [] }), 2500);
+      } else {
+        target.disabled = false;
+        target.textContent = "İndir ve Kur";
+        updateClaudeInstallFeedback({ status: "error", message: res.error || "Claude Code CLI kurulamadı." });
+        toast(clientMessage(res.error || "Claude Code CLI kurulamadı."), "bad");
+      }
+    },
+    onSite: async () => {
+      const res = await cizi.openClaudeCodeSite();
+      if (!res.ok) toast(clientMessage(res.error || "Resmî site açılamadı."), "bad");
+    },
+    onOpen: async (event) => {
+      const target = event.currentTarget;
+      target.disabled = true;
+      const res = await cizi.openClaudeCodeCli();
+      target.disabled = false;
+      if (res.ok) toast("Claude Code CLI başlatıldı.", "good");
+      else toast(clientMessage(res.error || "Claude Code CLI başlatılamadı."), "bad");
+    },
+    onRemove: async (event) => {
+      const target = event.currentTarget;
+      if (!confirm("Claude Code CLI kökten kaldırılacak. Claude Desktop korunur. Devam edilsin mi?")) return;
+      target.disabled = true;
+      target.textContent = "Kaldırılıyor...";
+      clog("info", "Claude Code CLI kökten kaldırılıyor");
+      const res = await cizi.uninstallClaudeCode();
+      if (res.ok && !(res.data?.stillExists || []).length) {
+        toast("Claude Code CLI kaldırıldı.", "good");
+        clog("success", "Claude Code CLI kökten kaldırıldı");
+      } else {
+        toast(clientMessage(res.error || "Kaldırma kısmen tamamlandı."), "bad");
+        clog("warning", "Claude Code CLI kaldırma kısmen tamamlandı");
+      }
+      await loadTemplatesAndTools();
+    },
+  }));
+
+  products.appendChild(claudeDesktopBlock(desktop, connected));
+  row.appendChild(products);
+  return row;
+}
+
+// Claude Desktop needs a repair action the other products do not: a Claude
+// update replaces the managed configuration, and the transplanted engine
+// re-applies it in one transaction.
+function claudeDesktopBlock(desktop, connected) {
+  const block = document.createElement("div");
+  block.className = "codex-product";
+
+  const head = document.createElement("div");
+  head.className = "codex-product-info";
+  const title = document.createElement("div");
+  title.className = "codex-product-name";
+  title.textContent = CLAUDE_DESKTOP_NAME;
+  const sub = document.createElement("div");
+  sub.className = "tool-sub";
+  sub.textContent = !desktop.installed
+    ? "Kurulu değil · resmî Claude paketiyle kurulur"
+    : desktop.needsRefresh
+      ? `Kurulu · sürüm ${desktop.version || "bilinmiyor"} · ayarlar yenilenmeli`
+      : desktop.running
+        ? `Kurulu · sürüm ${desktop.version || "bilinmiyor"} · şu an açık`
+        : `Kurulu · sürüm ${desktop.version || "bilinmiyor"}`;
+  head.appendChild(title);
+  head.appendChild(sub);
+
+  const actions = document.createElement("div");
+  actions.className = "tool-actions-buttons";
+
+  if (!desktop.installed) {
+    actions.appendChild(button({
+      label: "İndir ve Kur", className: "primary tiny-btn", cliId: "claude-desktop.install",
+      cliLabel: "Claude Desktop kur", long: true,
+      onClick: async (event) => {
+        const target = event.currentTarget;
+        target.disabled = true;
+        target.textContent = "Kuruluyor...";
+        updateClaudeProgress({ phase: "starting", message: "Claude Desktop kurulumu başlatılıyor...", details: null });
+        let res;
+        try { res = await cizi.installClaudeDesktop(); } catch (error) { res = { ok: false, error: error?.message || "Claude Desktop kurulamadı." }; }
+        if (res.ok) {
+          updateClaudeProgress({ phase: "complete", message: "Claude Desktop kuruldu.", details: null });
+          toast("Claude Desktop kuruldu.", "good");
+          clog("success", "Claude Desktop kuruldu");
+          await loadTemplatesAndTools();
+          setTimeout(() => updateClaudeProgress({ phase: "idle", message: "", details: null }), 2500);
+        } else {
+          target.disabled = false;
+          target.textContent = "İndir ve Kur";
+          updateClaudeProgress({ phase: "error", message: res.error || "Claude Desktop kurulamadı.", details: null });
+          toast(clientMessage(res.error || "Claude Desktop kurulamadı."), "bad");
+        }
+      },
+    }));
+    actions.appendChild(button({
+      label: "Resmî site", className: "ghost tiny-btn", cliId: "claude-desktop.official-site",
+      cliLabel: "Claude Desktop resmî sayfası",
+      onClick: async () => {
+        const res = await cizi.openExternal("https://claude.ai/download");
+        if (!res.ok) toast(clientMessage(res.error || "Resmî site açılamadı."), "bad");
+      },
+    }));
+  } else {
+    actions.appendChild(button({
+      label: "Aç", className: "ghost tiny-btn", cliId: "claude-desktop.open", cliLabel: "Claude Desktop aç",
+      onClick: async (event) => {
+        const target = event.currentTarget;
+        target.disabled = true;
+        const res = await cizi.launchClaudeDesktop();
+        target.disabled = false;
+        if (res.ok) toast("Claude Desktop açıldı.", "good");
+        else toast(clientMessage(res.error || "Claude Desktop açılamadı."), "bad");
+      },
+    }));
+    if (connected || desktop.needsRefresh) {
+      actions.appendChild(button({
+        label: "Onar", className: "ghost tiny-btn", cliId: "claude-desktop.repair", cliLabel: "Claude Desktop onar",
+        long: true, title: "Claude güncellemesinden sonra Cizi Code ayarlarını yeniden uygular",
+        onClick: async (event) => {
+          const target = event.currentTarget;
+          target.disabled = true;
+          target.textContent = "Onarılıyor...";
+          const res = await cizi.repairClaudeDesktop();
+          target.disabled = false;
+          target.textContent = "Onar";
+          if (res.ok && res.data?.reconciled) toast("Claude Desktop ayarları yenilendi.", "good");
+          else if (res.ok) toast(res.data?.reason === "running" ? "Önce Claude Desktop'ı kapatın." : "Onarım tamamlanamadı.", "bad");
+          else toast(clientMessage(res.error || "Onarım başarısız."), "bad");
+          await loadTemplatesAndTools();
+        },
+      }));
+    }
+    if (desktop.running) {
+      actions.appendChild(button({
+        label: "Kapat", className: "ghost tiny-btn", cliId: "claude-desktop.stop", cliLabel: "Claude Desktop kapat",
+        title: "Ayar değiştirmeden önce Claude Desktop tamamen kapatılmalıdır",
+        onClick: async (event) => {
+          const target = event.currentTarget;
+          target.disabled = true;
+          const res = await cizi.stopClaudeDesktop();
+          target.disabled = false;
+          if (res.ok) toast("Claude Desktop kapatıldı.", "good");
+          else toast(clientMessage(res.error || "Claude Desktop kapatılamadı."), "bad");
+          await loadTemplatesAndTools();
+        },
+      }));
+    }
+  }
+
+  block.appendChild(head);
+  block.appendChild(actions);
   return block;
 }
 
@@ -838,10 +1122,14 @@ function renderTools(statuses) {
   for (const st of statuses) {
     if (!offered.includes(st.id)) continue;
 
-    // Codex is one switch over two products sharing one config file, so its
-    // row is built on its own instead of through the single-tool layout.
+    // Claude and Codex are each one switch over two products, so their rows are
+    // built on their own instead of through the single-tool layout.
     if (st.id === CODEX_CLI_TOOL_ID) {
       list.appendChild(renderCodexRow(st, models));
+      continue;
+    }
+    if (st.id === CLAUDE_CODE_CLI_TOOL_ID) {
+      list.appendChild(renderClaudeRow(st, models));
       continue;
     }
 
@@ -857,33 +1145,22 @@ function renderTools(statuses) {
 
     const sub = document.createElement("div");
     sub.className = "tool-sub";
-    const managedCliName = CLAUDE_CODE_CLI_NAME;
-    const managedCliStatus = st.id === CLAUDE_CODE_CLI_TOOL_ID ? CLAUDE_CLI_STATUS : null;
     sub.textContent = st.applied
-      ? `${managedCliName} is connected to Cizi Code`
-      : managedCliStatus?.installed
-        ? `Kurulu: ${managedCliStatus.version || managedCliStatus.command || managedCliName}`
+      ? `${st.name} is connected to Cizi Code`
       : st.hasBackup
         ? "Turn on to reconnect, or leave off to keep your previous settings"
-        : `Turn on to prepare ${managedCliName} automatically`;
+        : `Turn on to prepare ${st.name} automatically`;
 
     info.appendChild(name);
     info.appendChild(sub);
 
-    if (st.id === CLAUDE_CODE_CLI_TOOL_ID && !CLAUDE_CLI_STATUS.installed) {
-      sub.textContent = CLAUDE_CLI_STATUS.message || `${CLAUDE_CODE_CLI_NAME} is not installed on this computer.`;
-      renderClaudeInstallActions(row, info);
-      list.appendChild(row);
-      continue;
-    }
     const actions = document.createElement("div");
     actions.className = "tool-actions";
     const sw = document.createElement("label");
     sw.className = "switch";
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    const cliToolId = st.id === CLAUDE_CODE_CLI_TOOL_ID ? "claude-code-cli" : st.id === CODEX_CLI_TOOL_ID ? "codex-cli" : st.id;
-    cb.dataset.cliId = `tool.${cliToolId}.switch`;
+    cb.dataset.cliId = `tool.${st.id}.switch`;
     cb.dataset.cliLabel = `${st.name} connection`;
     cb.checked = !!st.applied;
     cb.disabled = enabledIds.size > 0 && !enabledIds.has(st.id);
@@ -892,57 +1169,6 @@ function renderTools(statuses) {
     sw.appendChild(cb);
     sw.appendChild(slider);
     actions.appendChild(sw);
-    if (st.id === CLAUDE_CODE_CLI_TOOL_ID && CLAUDE_CLI_STATUS.installed) {
-      const openBtn = document.createElement("button");
-      openBtn.type = "button";
-      openBtn.className = "ghost tiny-btn";
-      openBtn.dataset.cliId = "claude-code-cli.open";
-      openBtn.dataset.cliLabel = "Open Claude Code CLI";
-      openBtn.textContent = "Aç";
-      openBtn.addEventListener("click", async () => {
-        openBtn.disabled = true;
-        const res = await cizi.openClaudeCodeCli();
-        if (res.ok) toast("Claude Code CLI başlatıldı.", "good");
-        else toast(clientMessage(res.error || "Claude Code CLI başlatılamadı."), "bad");
-        openBtn.disabled = false;
-      });
-      actions.appendChild(openBtn);
-
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.className = "ghost tiny-btn danger";
-      removeBtn.dataset.cliId = "claude-code-cli.purge";
-      removeBtn.dataset.cliLabel = "Kökten Kaldır Claude Code CLI";
-      removeBtn.textContent = "Kökten Kaldır";
-      removeBtn.title = "Claude Code CLI izlerini kökten siler";
-      removeBtn.addEventListener("click", async () => {
-        if (!confirm("Claude Code CLI kökten kaldırılacak. Devam edilsin mi?")) return;
-        removeBtn.disabled = true;
-        openBtn.disabled = true;
-        removeBtn.textContent = "Kaldırılıyor...";
-        clog("info", "Claude Code CLI kökten kaldırılıyor");
-        const res = await cizi.uninstallClaudeCode();
-        if (res.ok) {
-          const n = res.data?.removed?.length || 0;
-          const still = res.data?.stillExists?.length || 0;
-          if (still > 0) {
-            toast(`Kaldırıldı (${n} öğe) ama ${still} iz kaldı — yeniden deneyin.`, "bad");
-            clog("warn", `Kökten kaldırma kısmen tamamlandı: ${still} iz kaldı`);
-          } else {
-            toast(`Claude Code CLI kaldırıldı (${n} öğe).`, "good");
-            clog("success", `Claude Code CLI kökten kaldırıldı (${n} öğe)`);
-          }
-        } else {
-          toast(clientMessage(res.error || "Kökten kaldırma başarısız."), "bad");
-          clog("error", clientMessage(res.error || "Kökten kaldırma başarısız."));
-        }
-        removeBtn.disabled = false;
-        openBtn.disabled = false;
-        removeBtn.textContent = "Kökten Kaldır";
-        await loadTemplatesAndTools();
-      });
-      actions.appendChild(removeBtn);
-    }
     cb.addEventListener("change", async () => {
       cb.disabled = true;
       clog("info", `${st.name}: ${cb.checked ? "connect" : "restore"}`, { tool: st.id });
@@ -1115,6 +1341,7 @@ cizi.onUpdateState(renderUpdateState);
 if (cizi.onClaudeCodeInstallState) cizi.onClaudeCodeInstallState(updateClaudeInstallFeedback);
 if (cizi.onCodexCliInstallState) cizi.onCodexCliInstallState(updateCodexInstallFeedback);
 if (cizi.onCodexDesktopInstallState) cizi.onCodexDesktopInstallState(updateCodexDesktopInstallFeedback);
+if (cizi.onClaudeProgress) cizi.onClaudeProgress(updateClaudeProgress);
 if (window.ciziCliUi?.handle && cizi.onCliRequest && cizi.cliReady) {
   cizi.onCliRequest((request) => window.ciziCliUi.handle(request));
   cizi.cliReady();
