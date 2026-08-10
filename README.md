@@ -112,9 +112,25 @@ yerde çözülemeyen bir kimlik olurdu. Otomatik sıkıştırma eşiği, kullan�
 geçebileceği en küçük pencereye göre hesaplanır. Effort varsayılanı Claude
 Code'un kendi kümesinden (`low`/`medium`/`high`/`xhigh`/`max`) seçilir.
 
+Effort/thinking seçicisi Claude Code'da `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` ile
+açılır: CLI, seçiciyi tanıdığı model kimliklerinden oluşan bir tabloya göre
+gösterir ve gateway kimlikleri (`Opus-5`) o tabloda olmadığı için seçici
+kayboluyordu.
+
 Claude Desktop aynı modellerin tamamını `inferenceModels` listesine yazar; ilk
 kayıt varsayılandır, `supports1m` yalnız gerçekten 1M varyantı olan modellere,
-`prefer1m` ise yalnız varsayılan kayda konur. Açılan yüzeyler: Chat, gelişmiş
+`prefer1m` ise yalnız varsayılan kayda konur. Hangi modelin 1M varyantı olduğu
+tahmin edilmez: gateway'in `/v1/models` çıktısı her varyantı ayrı bir kimlik
+(`Opus-5[1m]`) olarak yayınlar, uygulama da bunu okur.
+
+Claude Desktop'ın effort seçicisi için karşılığı olan bir yapılandırma anahtarı
+**yoktur**: uygulama seçiciyi yalnız model kimliğinden karar verir ve kimliği
+normalleştirip kendi iç tablosunda arar (`claude-opus-5`, `claude-sonnet-4-6`
+gibi; `fable`/`mythos` ile başlayan her kimlik de kabul edilir). Gateway böyle
+bir kimlik yayınlıyorsa uygulama `inferenceModels` kaydında onu kullanır ve
+markalı adı `labelOverride`'a taşır, seçici de görünür. Yayınlamıyorsa kimlik
+uydurulmaz — yönlendirme bozulacağı için — ve seçici çıkmaz; kaç modelde
+çıktığı `effortPickerModels` olarak günlüğe yazılır. Açılan yüzeyler: Chat, gelişmiş
 dosya analizi, Cowork, Claude Code sekmesi ve masaüstü uzantıları. `toolSearch`
 ve `autoMode` bilerek açılmaz — ilki gateway'in kabul etmediği deneysel
 `anthropic-beta` başlıkları gönderttiği için istekleri HTTP 400'e düşürebilir,

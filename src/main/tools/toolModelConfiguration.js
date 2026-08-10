@@ -4,7 +4,13 @@
 // picker inside Claude Code / Claude Desktop / Codex shows the whole list. The
 // first entry is the default, because all three products treat it that way.
 const { modelsForTool, modelName, toolIsGated } = require("../../renderer/modelFamilies");
-const { capabilityFor, tierFor, CLAUDE_TIERS } = require("../../renderer/modelCapabilities");
+const {
+  capabilityFor,
+  tierFor,
+  CLAUDE_TIERS,
+  claudeDesktopEffortAlias,
+  claudeDesktopShowsEffort,
+} = require("../../renderer/modelCapabilities");
 
 const CLAUDE_TOOL_ID = "claude-code";
 const CODEX_TOOL_ID = "codex";
@@ -41,19 +47,41 @@ function hasToken(name, token) {
   return new RegExp(`(^|[^a-z0-9])${token}([^a-z0-9]|$)`, "i").test(name);
 }
 
+// "Opus-5" has to beat "Opus-4.8" when both are on the key, otherwise the newest
+// model the user pays for is never the default. Versions are compared segment
+// by segment so 4.10 sorts above 4.8 rather than below it.
+function versionOf(name) {
+  const match = String(name || "").match(/(\d+(?:[._]\d+)*)\s*$/);
+  return match ? match[1].split(/[._]/).map(Number) : [];
+}
+
+function newerVersion(a, b) {
+  const left = versionOf(a);
+  const right = versionOf(b);
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0);
+    if (diff) return diff > 0;
+  }
+  return false;
+}
+
+function newestOf(names) {
+  return names.reduce((best, name) => (best === null || newerVersion(name, best) ? name : best), null);
+}
+
 function preferredModel(toolId, names, currentModel) {
   const current = String(currentModel || "").trim();
   if (current && names.includes(current)) return current;
   if (toolId === CLAUDE_TOOL_ID) {
     for (const tier of CLAUDE_DEFAULT_TIER_ORDER) {
-      const match = names.find((name) => tierFor(name) === tier);
+      const match = newestOf(names.filter((name) => tierFor(name) === tier));
       if (match) return match;
     }
     return names[0] || null;
   }
   if (toolId === CODEX_TOOL_ID) {
     for (const hint of CODEX_DEFAULT_HINTS) {
-      const match = names.find((name) => hasToken(name, hint));
+      const match = newestOf(names.filter((name) => hasToken(name, hint)));
       if (match) return match;
     }
     return names.find((name) => /^gpt[-_.:]/i.test(name)) || names[0] || null;
@@ -62,13 +90,34 @@ function preferredModel(toolId, names, currentModel) {
 }
 
 // Claude Code resolves the bare aliases (opus/sonnet/haiku/fable) through the
-// ANTHROPIC_DEFAULT_*_MODEL variables, so each slot gets the first model of
+// ANTHROPIC_DEFAULT_*_MODEL variables, so each slot gets the newest model of
 // that tier and falls back to the default only when the account has none.
 function claudeTierModel(profiles, tier, fallback) {
-  return profiles.find((profile) => profile.tier === tier)?.name || fallback;
+  return newestOf(profiles.filter((profile) => profile.tier === tier).map((profile) => profile.name)) || fallback;
 }
 
-function configurationForTool(toolId, accountModels, { currentModel } = {}) {
+// `/api/me` only names the models a key may call. The gateway's own
+// `/v1/models` is the list the tools read, and it is the only place that says
+// which models really have a 1M variant - it publishes `<id>[1m]` as a separate
+// id. Without it the app can only fall back to the tier rule, which is a guess.
+function gatewayFacts(name, gatewayModels) {
+  if (!gatewayModels || !gatewayModels.size) return {};
+  const alias = claudeDesktopEffortAlias(name);
+  // Claude Desktop shows its effort picker only for ids it recognises. When the
+  // gateway publishes such an id for this model, using it as the entry name is
+  // what makes the picker appear; inventing one the gateway does not serve
+  // would just break routing, so it is only ever taken from this list.
+  const effortName = alias
+    ? [...gatewayModels].find((id) => claudeDesktopShowsEffort(id) && claudeDesktopEffortAlias(id) === alias)
+    : undefined;
+  return {
+    supports1m: gatewayModels.has(`${name}[1m]`),
+    ...(effortName ? { desktopEffortName: effortName } : {}),
+  };
+}
+
+function configurationForTool(toolId, accountModels, { currentModel, gatewayModels } = {}) {
+  const gatewayIds = new Set((gatewayModels || []).map((id) => String(id || "").trim()).filter(Boolean));
   const candidates = toolIsGated(toolId) ? modelsForTool(accountModels, toolId) : accountModels;
   const compatible = uniqueModelNames(candidates);
   if (!compatible.length) {
@@ -84,9 +133,15 @@ function configurationForTool(toolId, accountModels, { currentModel } = {}) {
     const name = String(modelName(candidate) || "").trim();
     if (name && !firstByName.has(name)) firstByName.set(name, candidate);
   }
-  // Capabilities come from the account record when it has them and from the
-  // gateway contract otherwise - never from the tool's own idea of the model.
-  const modelProfiles = models.map((name) => capabilityFor(firstByName.get(name) || name, toolId));
+  // Capabilities come from the gateway first, then the account record, and only
+  // then from the tier rule - never from the tool's own idea of the model.
+  const modelProfiles = models.map((name) => {
+    const candidate = firstByName.get(name) || name;
+    const enriched = typeof candidate === "string"
+      ? { name, ...gatewayFacts(name, gatewayIds) }
+      : { ...candidate, name, ...gatewayFacts(name, gatewayIds) };
+    return capabilityFor(enriched, toolId);
+  });
   const activeProfile = modelProfiles.find((profile) => profile.name === model) || modelProfiles[0];
   const values = {
     model,

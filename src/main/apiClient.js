@@ -115,4 +115,25 @@ async function getTemplates(baseUrl, apiKey) {
   return call(baseUrl, apiKey, "/api/cli-tools/templates");
 }
 
-module.exports = { DEFAULT_BASE_URL, TOOL_BASE_URL, getMe, getUsage, getTemplates, normalizeBase, sanitizeErrorMessage };
+// The gateway's own model list. `/api/me` only names the models the key may
+// call; this endpoint is what the tools themselves read, and it is the only
+// place that says which models actually have a `[1m]` variant. Claude Desktop
+// documents the same rule: an inferenceModels entry must use the exact id
+// returned here. Callers treat a failure as "no extra information" rather than
+// an error, so a gateway that does not expose it still configures.
+async function getGatewayModels(baseUrl, apiKey) {
+  const body = await call(baseUrl, apiKey, "/v1/models");
+  const list = Array.isArray(body?.data) ? body.data : [];
+  return list.map((entry) => String(entry?.id || "").trim()).filter(Boolean);
+}
+
+module.exports = {
+  DEFAULT_BASE_URL,
+  TOOL_BASE_URL,
+  getMe,
+  getUsage,
+  getTemplates,
+  getGatewayModels,
+  normalizeBase,
+  sanitizeErrorMessage,
+};

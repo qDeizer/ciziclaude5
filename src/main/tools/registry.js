@@ -62,11 +62,13 @@ function profileMap(values, toolId) {
 
 // Claude Code names the 1M-context variant `<model>[1m]`, but only sonnet,
 // opus and fable have one - its alias table has no `haiku[1m]`, so suffixing a
-// Haiku model yields an id nothing resolves. `longContextModelName` enforces
-// that; this only decides whether the variant is wanted at all.
+// Haiku model yields an id nothing resolves. When the gateway has told us it
+// publishes `<model>[1m]` the answer is a fact and that exact id is used;
+// otherwise `longContextModelName` applies the tier rule.
 function configuredClaudeModel(name, profiles) {
   const profile = profiles.get(name) || capabilityFor(name, "claude-code");
-  return profile.supports1m ? longContextModelName(name, profile.tier) : name;
+  if (!profile.supports1m) return name;
+  return profile.supports1mVerified ? `${name}[1m]` : longContextModelName(name, profile.tier);
 }
 
 // `availableModels` is an allow-list, not the picker's source list: Claude Code
@@ -115,6 +117,11 @@ const TOOLS = {
         // only ever offers the four alias defaults above.
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(claudeCompactWindow(v, profiles)),
+        // Claude Code decides whether to offer the effort picker from a table of
+        // model ids it knows. A gateway id ("Opus-5") is not in it, so /effort
+        // and the picker disappear even though the model supports effort. This
+        // is the CLI's own override for exactly that case.
+        CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: "1",
       };
       // A pre-existing user opt-out would hide every [1m] variant. The full
       // original settings file is restored from the application backup when
@@ -144,6 +151,7 @@ const TOOLS = {
         && cfg?.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL
         && cfg?.env?.ANTHROPIC_DEFAULT_FABLE_MODEL
         && cfg?.env?.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "1"
+        && cfg?.env?.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT === "1"
         && Number(cfg?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW) > 0
         && cfg?.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT !== "1");
       if (!complete) return false;
@@ -161,6 +169,7 @@ const TOOLS = {
         && env.ANTHROPIC_DEFAULT_HAIKU_MODEL === configuredClaudeModel(v.haiku || v.model, profiles)
         && env.ANTHROPIC_DEFAULT_FABLE_MODEL === configuredClaudeModel(v.fable || v.model, profiles)
         && env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "1"
+        && env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT === "1"
         && env.CLAUDE_CODE_AUTO_COMPACT_WINDOW === String(claudeCompactWindow(v, profiles))
         && env.CLAUDE_CODE_DISABLE_1M_CONTEXT !== "1"
         && cfg?.effortLevel === claudeEffortLevel(v)
@@ -186,6 +195,7 @@ const TOOLS = {
       delete nextEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
       delete nextEnv.ANTHROPIC_DEFAULT_FABLE_MODEL;
       delete nextEnv.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
+      delete nextEnv.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT;
       delete nextEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
 
       const next = { ...cfg };

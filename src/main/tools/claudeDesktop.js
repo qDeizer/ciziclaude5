@@ -198,6 +198,10 @@ function createClaudeDesktopBackend(overrides = {}) {
       configurationSurface,
       modelCount: models.length,
       longContextModels: models.filter((model) => model.supports1m === true).length,
+      // Claude Desktop derives the effort picker from the model id alone. When
+      // this is short of modelCount the gateway does not publish an id Claude
+      // Desktop recognises for those models, and no config key can add one.
+      effortPickerModels: models.filter((model) => model.showsEffortPicker === true).length,
       chatEnabled: config.chatTabEnabled === true || config.chatTabEnabled === "true",
       advancedFileAnalysis: config.chatAdvancedFileAnalysisEnabled === true
         || config.chatAdvancedFileAnalysisEnabled === "true",

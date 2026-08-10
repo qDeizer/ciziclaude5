@@ -23,7 +23,12 @@
 
 // 7: the managed surface writes only verified keys, and model entries assert
 // 1M support per model instead of for everything.
-const { capabilityFor, tierFor, CLAUDE_TIERS } = require("../../renderer/modelCapabilities");
+const {
+  capabilityFor,
+  tierFor,
+  CLAUDE_TIERS,
+  claudeDesktopShowsEffort,
+} = require("../../renderer/modelCapabilities");
 
 const STATE_SCHEMA_VERSION = 7;
 const DIRECT_GATEWAY_MODE = "direct-gateway";
@@ -102,13 +107,23 @@ function normalizedModels(values) {
     const tier = CLAUDE_TIERS.includes(profile.tier) ? profile.tier : tierFor(value);
     const isFamilyDefault = Boolean(tier) && !seenTiers.has(tier);
     if (tier) seenTiers.add(tier);
+    // Claude Desktop attaches the effort/thinking picker only to model ids it
+    // recognises, and there is no config key to override that. When the gateway
+    // publishes such an id for this model, that is the one the entry has to
+    // carry; the branded name then moves to labelOverride so the picker still
+    // reads "Opus 5". Never invented - only ever an id the gateway serves.
+    const effortName = profile.desktopEffortName && profile.desktopEffortName !== name
+      ? profile.desktopEffortName
+      : null;
     return {
-      name,
+      name: effortName || name,
+      ...(effortName ? { labelOverride: name } : {}),
       ...(CLAUDE_TIERS.includes(tier) ? { tier, isFamilyDefault } : {}),
       supports1m: profile.supports1m === true,
       // The picker only honours prefer1m on the default entry, so asserting it
       // anywhere else is noise in the config the user has to read.
       prefer1m: index === 0 && profile.supports1m === true,
+      showsEffortPicker: claudeDesktopShowsEffort(effortName || name),
     };
   }).filter(Boolean);
 }

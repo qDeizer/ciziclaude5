@@ -27,6 +27,13 @@ const KEY = "sk-test-key";
 const CLAUDE_MODELS = ["opus-4.8", "sonnet-4.6", "haiku-4.5", "fable-5"];
 const CODEX_MODELS = ["gpt-5.6-luna", "gpt-5.6-terra", "Sol 5.6"];
 const COMBOS = [...CLAUDE_MODELS, ...CODEX_MODELS];
+// The gateway publishes each 1M variant as its own id, so this list is the only
+// truthful source for supports1m. Here fable-5 deliberately has no variant.
+const GATEWAY_MODELS = [
+  ...COMBOS,
+  "opus-4.8[1m]", "sonnet-4.6[1m]",
+  "gpt-5.6-luna[1m]", "gpt-5.6-terra[1m]", "Sol 5.6[1m]",
+];
 
 const results = [];
 function check(name, fn) {
@@ -68,7 +75,7 @@ check("only tiers with a 1M variant get the [1m] suffix", () => {
 });
 
 // -------------------------------------------------------------- Claude Code CLI
-const claudeValues = { base: BASE, apiKey: KEY, ...configurationForTool("claude-code", COMBOS) };
+const claudeValues = { base: BASE, apiKey: KEY, ...configurationForTool("claude-code", COMBOS, { gatewayModels: GATEWAY_MODELS }) };
 getTool("claude-code").apply(claudeValues);
 const settings = JSON.parse(fs.readFileSync(path.join(SANDBOX, ".claude", "settings.json"), "utf8"));
 
@@ -84,6 +91,43 @@ check("availableModels holds plain ids - it is an allow-list, not a picker list"
 check("Haiku's default model has no [1m] variant", () => {
   assert.strictEqual(settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, "haiku-4.5");
   assert.strictEqual(settings.env.ANTHROPIC_DEFAULT_OPUS_MODEL, "opus-4.8[1m]");
+});
+
+check("a 1M variant is claimed only where the gateway publishes one", () => {
+  const by = new Map(claudeValues.modelProfiles.map((profile) => [profile.name, profile]));
+  assert.strictEqual(by.get("opus-4.8").supports1m, true);
+  assert.strictEqual(by.get("sonnet-4.6").supports1m, true);
+  assert.strictEqual(by.get("fable-5").supports1m, false, "gateway lists no fable-5[1m]");
+  assert.strictEqual(settings.env.ANTHROPIC_DEFAULT_FABLE_MODEL, "fable-5");
+});
+
+check("the effort picker is forced on for gateway model ids", () => {
+  assert.strictEqual(settings.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT, "1");
+});
+
+check("the newest model of a tier wins the default", () => {
+  const picked = configurationForTool("claude-code", ["opus-4.8", "opus-5", "opus-4.10", "sonnet-4.6"]);
+  assert.strictEqual(picked.model, "opus-5");
+  assert.strictEqual(picked.opus, "opus-5");
+  const dotted = configurationForTool("claude-code", ["opus-4.8", "opus-4.10"]);
+  assert.strictEqual(dotted.model, "opus-4.10", "4.10 is newer than 4.8");
+});
+
+check("Claude Desktop effort ids are only used when the gateway serves them", () => {
+  const withAlias = configurationForTool("claude-code", ["Opus-5"], {
+    gatewayModels: ["Opus-5", "claude-opus-5"],
+  });
+  assert.strictEqual(withAlias.modelProfiles[0].desktopEffortName, "claude-opus-5");
+  const entry = contract.desktopModels({ ...withAlias })[0];
+  assert.strictEqual(entry.name, "claude-opus-5");
+  assert.strictEqual(entry.labelOverride, "Opus-5");
+  assert.strictEqual(entry.showsEffortPicker, true);
+
+  const without = configurationForTool("claude-code", ["Opus-5"], { gatewayModels: ["Opus-5"] });
+  assert.strictEqual(without.modelProfiles[0].desktopEffortName, null);
+  const plain = contract.desktopModels({ ...without })[0];
+  assert.strictEqual(plain.name, "Opus-5", "an id the gateway does not serve is never invented");
+  assert.strictEqual(plain.showsEffortPicker, false);
 });
 
 check("gateway model discovery is on, and the 1M opt-out is not", () => {
@@ -162,7 +206,7 @@ check("the API key never lands in the managed config", () => {
 
 // ------------------------------------------------------------------------ Codex
 let codexApplied = false;
-const codexValues = { base: BASE, apiKey: KEY, ...configurationForTool("codex", COMBOS) };
+const codexValues = { base: BASE, apiKey: KEY, ...configurationForTool("codex", COMBOS, { gatewayModels: GATEWAY_MODELS }) };
 try {
   getTool("codex").apply(codexValues);
   codexApplied = true;

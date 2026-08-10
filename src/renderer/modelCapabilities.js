@@ -37,6 +37,49 @@
   const CLAUDE_TIERS = Object.freeze(["opus", "sonnet", "haiku", "fable", "mythos"]);
   const TIERS_WITHOUT_LONG_CONTEXT = Object.freeze(["haiku"]);
 
+  // Claude Desktop's Chat tab decides whether to show the effort/thinking picker
+  // from the model id alone: it normalizes the id (dropping bedrock ARN and
+  // `<region>.anthropic.` prefixes, a `[1m]` suffix and date/version suffixes)
+  // and looks it up in a built-in table. There is no managed-config key for it,
+  // so a gateway id like "Opus-5" simply has no entry and the picker is hidden.
+  // These are that table's keys, plus the rule it applies to fable/mythos.
+  const CLAUDE_DESKTOP_EFFORT_MODELS = Object.freeze([
+    "claude-haiku-4-5",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+  ]);
+  const CLAUDE_DESKTOP_EFFORT_FAMILY = /^(?:claude-)?(?:fable|mythos)(?:-|$)/;
+
+  // The same normalization Claude Desktop applies before that lookup.
+  function claudeDesktopModelKey(name) {
+    return String(name || "").trim().toLowerCase()
+      .replace(/^arn:aws[a-z-]*:bedrock:[^/]+\//, "")
+      .replace(/^(?:[a-z][a-z0-9-]*\.)?anthropic\./, "")
+      .replace(/\[[^\]]+\]$/, "")
+      .replace(/@\d{8}$/, "")
+      .replace(/-\d{8}$/, "");
+  }
+
+  function claudeDesktopShowsEffort(name) {
+    const key = claudeDesktopModelKey(name);
+    return CLAUDE_DESKTOP_EFFORT_MODELS.includes(key) || CLAUDE_DESKTOP_EFFORT_FAMILY.test(key);
+  }
+
+  // The id Claude Desktop would have to see for this model to get an effort
+  // picker: "Opus-5" -> "claude-opus-5", "Sonnet-4.5" -> "claude-sonnet-4-5".
+  // Returns null when no known model matches, so callers never invent an id.
+  function claudeDesktopEffortAlias(name) {
+    const key = claudeDesktopModelKey(name).replace(/[._]/g, "-");
+    if (CLAUDE_DESKTOP_EFFORT_FAMILY.test(key)) return key.startsWith("claude-") ? key : `claude-${key}`;
+    const canonical = key.startsWith("claude-") ? key : `claude-${key}`;
+    return CLAUDE_DESKTOP_EFFORT_MODELS.includes(canonical) ? canonical : null;
+  }
+
   function reasoningLevelsFor(toolId) {
     return toolId === CLAUDE_TOOL_ID ? CLAUDE_REASONING_LEVELS : CODEX_REASONING_LEVELS;
   }
@@ -57,12 +100,20 @@
     return CLAUDE_TIERS.find((tier) => new RegExp(`(^|[^a-z0-9])${tier}([^a-z0-9]|$)`, "i").test(name)) || "";
   }
 
-  function supportsLongContext(candidate, contextWindowTokens) {
-    if (contextWindowTokens < ONE_MILLION_TOKENS) return false;
+  function declared1m(candidate) {
     const explicit = typeof candidate === "object" && candidate
       ? candidate.supports1m ?? candidate.context?.supports1m
       : undefined;
-    if (typeof explicit === "boolean") return explicit;
+    return typeof explicit === "boolean" ? explicit : undefined;
+  }
+
+  // A stated value is a fact (the gateway either lists `<id>[1m]` or it does
+  // not); anything else is the tier rule, which only knows that Haiku has no
+  // 1M variant.
+  function supportsLongContext(candidate, contextWindowTokens) {
+    if (contextWindowTokens < ONE_MILLION_TOKENS) return false;
+    const explicit = declared1m(candidate);
+    if (explicit !== undefined) return explicit;
     return !TIERS_WITHOUT_LONG_CONTEXT.includes(tierFor(candidate));
   }
 
@@ -148,6 +199,11 @@
       maxContextWindowTokens,
       compactWindowTokens: compactWindowFor(contextWindowTokens),
       supports1m: supportsLongContext(candidate, contextWindowTokens),
+      // True when the 1M answer came from the gateway rather than the tier
+      // rule, which lets callers use the verified `<id>[1m]` id as-is.
+      supports1mVerified: declared1m(candidate) !== undefined,
+      desktopEffortName: typeof candidate === "object" && candidate?.desktopEffortName
+        ? String(candidate.desktopEffortName) : null,
       reasoningLevels: Object.freeze(reasoningLevels),
       defaultReasoningLevel,
     });
@@ -171,6 +227,10 @@
     ONE_MILLION_TOKENS,
     CLAUDE_TIERS,
     TIERS_WITHOUT_LONG_CONTEXT,
+    CLAUDE_DESKTOP_EFFORT_MODELS,
+    claudeDesktopModelKey,
+    claudeDesktopShowsEffort,
+    claudeDesktopEffortAlias,
     CLAUDE_REASONING_LEVELS,
     CODEX_REASONING_LEVELS,
     DEFAULT_REASONING_EFFORT,

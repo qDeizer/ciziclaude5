@@ -821,13 +821,34 @@ function requireSession() {
   return session;
 }
 
+// The gateway's own model list tells us which models really have a 1M variant
+// and which ids Claude Desktop will attach an effort picker to. It is an
+// enrichment, not a requirement: a gateway that cannot answer still configures,
+// just with the tier rule instead of facts.
+async function gatewayModelIds() {
+  const s = requireSession();
+  if (Array.isArray(s.gatewayModels)) return s.gatewayModels;
+  try {
+    s.gatewayModels = await api.getGatewayModels(api.TOOL_BASE_URL, s.apiKey);
+    log.info("models", `Gateway model listesi alındı (${s.gatewayModels.length} kayıt)`);
+  } catch (error) {
+    s.gatewayModels = [];
+    log.warning("models", "Gateway model listesi okunamadı; yetenekler aile kuralından türetilecek", {
+      status: error?.status || null,
+    });
+  }
+  return s.gatewayModels;
+}
+
 async function accountToolValues(toolId, currentModel = null) {
   const s = requireSession();
   if (!Array.isArray(s.combos)) {
     const me = await api.getMe(s.baseUrl, s.apiKey);
     s.combos = Array.isArray(me?.combos) ? me.combos : [];
+    s.gatewayModels = null;
   }
-  const automatic = configurationForTool(toolId, s.combos, { currentModel });
+  const gatewayModels = await gatewayModelIds();
+  const automatic = configurationForTool(toolId, s.combos, { currentModel, gatewayModels });
   return { base: api.TOOL_BASE_URL, apiKey: s.apiKey, ...automatic };
 }
 
@@ -851,7 +872,7 @@ ipcMain.handle("cizi:login", wrap("login", async ({ apiKey }) => {
   if (!apiKey) throw new Error("API key is required.");
   log.info("auth", "Login attempt");
   const me = await api.getMe(api.DEFAULT_BASE_URL, apiKey);
-  session = { baseUrl: api.DEFAULT_BASE_URL, apiKey, combos: Array.isArray(me?.combos) ? me.combos : [] };
+  session = { baseUrl: api.DEFAULT_BASE_URL, apiKey, combos: Array.isArray(me?.combos) ? me.combos : [], gatewayModels: null };
   store.saveSession({ apiKey });
   log.info("auth", `Login OK (models: ${(me?.combos || []).length})`);
   return me;
@@ -873,6 +894,7 @@ ipcMain.handle("cizi:getMe", wrap("getMe", async () => {
   const s = requireSession();
   const me = await api.getMe(s.baseUrl, s.apiKey);
   s.combos = Array.isArray(me?.combos) ? me.combos : [];
+  s.gatewayModels = null;
   return me;
 }));
 
