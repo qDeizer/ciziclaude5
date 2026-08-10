@@ -11,13 +11,11 @@ var CLAUDE_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
 var CLAUDE_STATE = { cli: { installed: false, applied: false }, desktop: { installed: false, applied: false }, connected: false, installedProducts: [] };
 var CLAUDE_PROGRESS = { phase: "idle", message: "", details: null };
 var CLAUDE_INSTALL_BUTTON = null;
-var CLAUDE_SELECTED_MODEL = null;
 var CODEX_CLI_STATUS = { installed: false, command: null, version: null };
 var CODEX_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
 var CODEX_DESKTOP_STATUS = { installed: false, version: null, packageFullName: null };
 var CODEX_DESKTOP_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
 var CODEX_CONFIG_STATE = { applied: false, model: null, path: null };
-var CODEX_SELECTED_MODEL = null;
 var ME = null;
 var LOG_TIMER = null;
 var LAST_USAGE_REFRESH = null;
@@ -181,7 +179,8 @@ function renderModels(models) {
     const name = typeof model === "string" ? model : model.name;
     const c = document.createElement("div");
     c.className = "chip";
-    c.textContent = name;
+    c.textContent = `${name} · 1M · effort`;
+    c.title = "Bu model araç içinde 1M bağlam ve desteklenen düşünme seviyeleriyle yapılandırılır";
     box.appendChild(c);
   }
 }
@@ -281,19 +280,14 @@ async function loadTemplatesAndTools() {
   CODEX_CLI_STATUS = codex.cli || { installed: false };
   CODEX_DESKTOP_STATUS = codex.desktop || { installed: false };
   CODEX_CONFIG_STATE = { ...(codex.config || { applied: false }), path: codex.configPath || null };
-  // The model box follows what the shared config actually says, so the UI never
-  // claims a model that Codex is not really using.
-  if (CODEX_CONFIG_STATE.applied && CODEX_CONFIG_STATE.model) CODEX_SELECTED_MODEL = CODEX_CONFIG_STATE.model;
   TEMPLATES = buildDefaultTemplates();
   renderTools(toolsRes.ok ? toolsRes.data : []);
 }
 
 function buildDefaultTemplates() {
   const combos = Array.isArray(ME?.combos) ? ME.combos : [];
-  const names = combos.map((m) => (typeof m === "string" ? m : m?.name)).filter(Boolean);
   return {
     combos,
-    defaultCombo: names.includes("Opus-4.8") ? "Opus-4.8" : names[0],
     tools: [{ id: CLAUDE_CODE_CLI_TOOL_ID, enabled: true }, { id: CODEX_CLI_TOOL_ID, enabled: true }],
   };
 }
@@ -524,29 +518,16 @@ function button({ label, className, cliId, cliLabel, title, onClick, long }) {
   return element;
 }
 
-// Model ids come from the gateway. The two documented defaults stay as a
-// fallback for keys whose model list has not loaded yet, and whatever the
-// shared config currently names is always offered so the UI can display the
-// real state rather than silently switching the user to something else.
-function codexModelIds(models) {
-  const names = (models || []).map((m) => (typeof m === "string" ? m : m?.name)).filter(Boolean);
-  const fallback = names.length ? [] : ["gpt-5.6-luna", "gpt-5.6-terra"];
-  const current = [CODEX_CONFIG_STATE.model, CODEX_SELECTED_MODEL].filter(Boolean);
-  return [...new Set([...names, ...fallback, ...current])];
-}
-
-const CODEX_PREFERRED_MODEL = "gpt-5.6-luna";
-
-// What the model box should start on. The connected config wins, because that
-// is what Codex is really using. Otherwise the documented Codex default is
-// preferred over the account's first model, which may well be a model that
-// belongs to a different tool.
-function codexDefaultModel(models) {
-  const ids = codexModelIds(models);
-  if (CODEX_CONFIG_STATE.applied && CODEX_CONFIG_STATE.model && ids.includes(CODEX_CONFIG_STATE.model)) return CODEX_CONFIG_STATE.model;
-  if (CODEX_SELECTED_MODEL && ids.includes(CODEX_SELECTED_MODEL)) return CODEX_SELECTED_MODEL;
-  if (ids.includes(CODEX_PREFERRED_MODEL)) return CODEX_PREFERRED_MODEL;
-  return ids.find((id) => /^gpt-/i.test(id)) || ids[0] || null;
+function automaticModelSummary(models, toolId) {
+  const count = modelNames(models).length;
+  const summary = document.createElement("span");
+  summary.className = "tool-model-summary";
+  const thinkingLabel = toolId === "claude-code" ? "thinking" : "effort";
+  summary.textContent = count ? `${count} model · 1M · ${thinkingLabel}` : "Uyumlu model yok";
+  summary.title = count
+    ? `Bu araca uygun modellerin tamamı 1M bağlam ve desteklenen ${thinkingLabel} seviyeleriyle otomatik eklenir`
+    : "Bu araç için uygun model bulunamadı";
+  return summary;
 }
 
 // The shared-folder note below is a Codex-only concept: its two products read
@@ -654,27 +635,7 @@ function renderClaudeRow(st, models) {
   const actions = document.createElement("div");
   actions.className = "tool-actions";
 
-  const modelSelect = document.createElement("select");
-  modelSelect.className = "tool-model";
-  modelSelect.dataset.cliId = "tool.claude.model";
-  modelSelect.dataset.cliLabel = "Claude modeli";
-  const names = (models || []).map((m) => (typeof m === "string" ? m : m?.name)).filter(Boolean);
-  const selected = CLAUDE_SELECTED_MODEL && names.includes(CLAUDE_SELECTED_MODEL)
-    ? CLAUDE_SELECTED_MODEL
-    : getDefaultModel(models);
-  CLAUDE_SELECTED_MODEL = selected;
-  for (const modelId of names.length ? names : [selected].filter(Boolean)) {
-    const option = document.createElement("option");
-    option.value = modelId;
-    option.textContent = modelId;
-    option.selected = modelId === selected;
-    modelSelect.appendChild(option);
-  }
-  // Claude Desktop pins one model at a time, so changing it means reconnecting.
-  modelSelect.disabled = desiredEnabled;
-  modelSelect.title = connected ? "Modeli değiştirmek için önce bağlantıyı kapatın" : "";
-  modelSelect.addEventListener("change", () => { CLAUDE_SELECTED_MODEL = modelSelect.value; });
-  actions.appendChild(modelSelect);
+  actions.appendChild(automaticModelSummary(models, "claude-code"));
 
   const sw = document.createElement("label");
   sw.className = "switch";
@@ -716,20 +677,21 @@ function renderClaudeRow(st, models) {
 
     let res;
     if (turningOn) {
-      if (!CLAUDE_SELECTED_MODEL) {
+      if (!modelNames(models).length) {
         toast("Bu anahtar için model bulunamadı.", "bad");
         cb.checked = false;
         cb.disabled = false;
         return;
       }
       res = await runWithRestartPrompt((closeRunning) =>
-        cizi.connectClaude(CLAUDE_SELECTED_MODEL, names, closeRunning));
+        cizi.connectClaude(closeRunning));
       if (res.ok) {
         updateClaudeProgress({ phase: "complete", message: "Claude bağlantısı doğrulandı.", details: null });
         const products = res.data?.connectedProducts || [];
+        const count = res.data?.modelCount || modelNames(models).length;
         toast(products.includes("desktop")
-          ? "Claude bağlandı. Claude Desktop yeni ayarlarla açıldı."
-          : "Claude Code CLI bağlandı.", "good");
+          ? `Claude bağlandı; ${count} model eklendi. Claude Desktop yeni ayarlarla açıldı.`
+          : `Claude Code CLI bağlandı; ${count} model eklendi.`, "good");
       } else {
         updateClaudeProgress({ phase: "error", message: res.error || "Claude bağlanamadı.", details: null });
         if (!res.cancelled) toast(clientMessage(res.error || "Claude bağlanamadı."), "bad");
@@ -1002,38 +964,7 @@ function renderCodexRow(st, models) {
   const actions = document.createElement("div");
   actions.className = "tool-actions";
 
-  const modelSelect = document.createElement("select");
-  modelSelect.className = "tool-model";
-  modelSelect.dataset.cliId = "tool.codex.model";
-  modelSelect.dataset.cliLabel = "Codex modeli";
-  const selected = codexDefaultModel(models);
-  CODEX_SELECTED_MODEL = selected;
-  for (const modelId of codexModelIds(models)) {
-    const option = document.createElement("option");
-    option.value = modelId;
-    option.textContent = modelId;
-    option.selected = modelId === selected;
-    modelSelect.appendChild(option);
-  }
-  modelSelect.addEventListener("change", async () => {
-    CODEX_SELECTED_MODEL = modelSelect.value;
-    // While connected the model lives in the shared config, so the change is
-    // written straight through; both products pick it up on next start.
-    if (!st.applied) return;
-    modelSelect.disabled = true;
-    const res = await cizi.setCodexModel(modelSelect.value);
-    modelSelect.disabled = false;
-    if (!res.ok) {
-      toast(clientMessage(res.error || "Model değiştirilemedi."), "bad");
-      return;
-    }
-    clog("info", `Codex modeli ${modelSelect.value} olarak ayarlandı`);
-    toast(res.data?.restartRequired
-      ? `Model ${modelSelect.value}. ChatGPT Desktop'ı yeniden başlatıp yeni bir Codex sohbeti açın.`
-      : `Model ${modelSelect.value}.`, "good");
-    await loadTemplatesAndTools();
-  });
-  actions.appendChild(modelSelect);
+  actions.appendChild(automaticModelSummary(models, "codex"));
 
   const sw = document.createElement("label");
   sw.className = "switch";
@@ -1055,18 +986,18 @@ function renderCodexRow(st, models) {
     const turningOn = cb.checked;
     clog("info", `Codex: ${turningOn ? "bağlanıyor" : "geri alınıyor"}`, { tool: st.id });
     if (turningOn) {
-      const model = CODEX_SELECTED_MODEL;
-      if (!model) {
+      if (!modelNames(models).length) {
         toast("Bu anahtar için model bulunamadı.", "bad");
         cb.checked = false;
         cb.disabled = false;
         return;
       }
-      const res = await cizi.applyTool(st.id, { model, models: codexModelIds(models) });
+      const res = await cizi.applyTool(st.id);
       if (res.ok) {
+        const count = res.data?.modelCount || modelNames(models).length;
         toast(CODEX_DESKTOP_STATUS.installed
-          ? "Codex bağlandı. ChatGPT Desktop'ı yeniden başlatıp yeni bir Codex sohbeti açın."
-          : "Codex bağlandı.", "good");
+          ? `Codex bağlandı; ${count} model eklendi. ChatGPT Desktop'ı yeniden başlatıp yeni bir Codex sohbeti açın.`
+          : `Codex bağlandı; ${count} model eklendi.`, "good");
       } else {
         toast(clientMessage(res.error || "Codex bağlanamadı."), "bad");
         cb.checked = false;
@@ -1190,7 +1121,7 @@ function renderCodexRow(st, models) {
     onOpen: async (event) => {
       const target = event.currentTarget;
       target.disabled = true;
-      const res = await cizi.openCodexCli(CODEX_SELECTED_MODEL, !!st.applied);
+      const res = await cizi.openCodexCli(!!st.applied);
       target.disabled = false;
       if (res.ok) toast(st.applied ? "Codex CLI Cizi Code bağlantısıyla açıldı." : "Codex CLI kendi ayarlarıyla açıldı.", "good");
       else toast(clientMessage(res.error || "Codex CLI başlatılamadı."), "bad");
@@ -1242,7 +1173,6 @@ function renderTools(statuses) {
     .filter((id) => FIRST_RELEASE_TOOLS.includes(id))
     // The key's own model families decide which products it may configure.
     .filter((id) => !toolIsGated(id) || toolIsUnlocked(models, id));
-  const defaultModel = getDefaultModel(models);
 
   if (!offered.length) {
     const empty = document.createElement("div");
@@ -1312,14 +1242,13 @@ function renderTools(statuses) {
       cb.disabled = true;
       clog("info", `${st.name}: ${cb.checked ? "connect" : "restore"}`, { tool: st.id });
       if (cb.checked) {
-        if (!defaultModel) {
+        if (!modelNames(models).length) {
           toast("No model is available for this key.", "bad");
           cb.checked = false;
           cb.disabled = false;
           return;
         }
-        const modelNames = models.map((m) => (typeof m === "string" ? m : m.name)).filter(Boolean);
-        const res = await cizi.applyTool(st.id, { model: defaultModel, models: modelNames });
+        const res = await cizi.applyTool(st.id);
         if (res.ok) toast(`${st.name} connected.`, "good");
         else {
           toast(clientMessage(res.error || "Could not connect this tool."), "bad");
@@ -1352,13 +1281,6 @@ function renderTools(statuses) {
     empty.textContent = "No matching local tools were found.";
     list.appendChild(empty);
   }
-}
-
-function getDefaultModel(models) {
-  const names = (models || []).map((m) => (typeof m === "string" ? m : m?.name)).filter(Boolean);
-  if (TEMPLATES?.defaultCombo && names.includes(TEMPLATES.defaultCombo)) return TEMPLATES.defaultCombo;
-  if (names.includes("Opus-4.8")) return "Opus-4.8";
-  return names[0] || "Opus-4.8";
 }
 
 function logTime(ts) {

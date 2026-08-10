@@ -22,7 +22,7 @@ contextBridge.exposeInMainWorld("cizi", {
   },
   getCodexCliStatus: () => ipcRenderer.invoke("cizi:getCodexCliStatus"),
   installCodexCli: () => ipcRenderer.invoke("cizi:installCodexCli"),
-  openCodexCli: (model, useCizi) => ipcRenderer.invoke("cizi:openCodexCli", { model, useCizi }),
+  openCodexCli: (useCizi) => ipcRenderer.invoke("cizi:openCodexCli", { useCizi }),
   planCodexCliUninstall: () => ipcRenderer.invoke("cizi:planCodexCliUninstall"),
   uninstallCodexCli: (removeShared) => ipcRenderer.invoke("cizi:uninstallCodexCli", { removeShared }),
   openCodexCliSite: () => ipcRenderer.invoke("cizi:openCodexCliSite"),
@@ -34,7 +34,7 @@ contextBridge.exposeInMainWorld("cizi", {
 
   getClaudeState: () => ipcRenderer.invoke("cizi:getClaudeState"),
   getClaudeProgress: () => ipcRenderer.invoke("cizi:getClaudeProgress"),
-  connectClaude: (model, models, closeRunning) => ipcRenderer.invoke("cizi:connectClaude", { model, models, closeRunning }),
+  connectClaude: (closeRunning) => ipcRenderer.invoke("cizi:connectClaude", { closeRunning }),
   disconnectClaude: (closeRunning) => ipcRenderer.invoke("cizi:disconnectClaude", { closeRunning }),
   installClaudeDesktop: () => ipcRenderer.invoke("cizi:installClaudeDesktop"),
   planClaudeDesktopUninstall: () => ipcRenderer.invoke("cizi:planClaudeDesktopUninstall"),
@@ -62,9 +62,8 @@ contextBridge.exposeInMainWorld("cizi", {
   },
 
   getCodexState: () => ipcRenderer.invoke("cizi:getCodexState"),
-  setCodexModel: (model) => ipcRenderer.invoke("cizi:setCodexModel", { model }),
   listTools: () => ipcRenderer.invoke("cizi:listTools"),
-  applyTool: (toolId, modelSlots) => ipcRenderer.invoke("cizi:applyTool", { toolId, modelSlots }),
+  applyTool: (toolId) => ipcRenderer.invoke("cizi:applyTool", { toolId }),
   revertTool: (toolId) => ipcRenderer.invoke("cizi:revertTool", { toolId }),
   reconcileTools: () => ipcRenderer.invoke("cizi:reconcileTools"),
 

@@ -32,7 +32,7 @@ const DESKTOP_MESSAGES = {
   REPAIR_REQUIRED: "Claude Desktop'ın önceki ayarlarının yedeği bulunamadı; önce onarım gerekiyor.",
   PROCESS_SCAN_FAILED: "Claude Desktop süreçleri güvenli şekilde denetlenemedi. Tekrar deneyin.",
   CLAUDE_DESKTOP_DETECTION_FAILED: "Cizi Code Claude Desktop'ı doğrulayamadı. Tekrar deneyin.",
-  CLAUDE_DESKTOP_MODEL_REQUIRED: "Claude Desktop'ı bağlamadan önce bir model seçin.",
+  CLAUDE_DESKTOP_MODEL_REQUIRED: "Claude Desktop için uygun bir hesap modeli bulunamadı.",
   TOOL_OPERATION_IN_PROGRESS: "Claude Desktop üzerinde başka bir işlem sürüyor. Bitmesini bekleyin.",
   CLAUDE_STATE_UNREADABLE: "Claude Desktop entegrasyon kaydı okunamıyor. Anahtarı kapatın; kayıtlı orijinal ayarlar geri yüklenecek.",
   CLAUDE_DESKTOP_DISCONNECT_PENDING: "Önceki bağlantı tam kapatılmamış; orijinal ayarlarınız hâlâ yedekte duruyor. Anahtarı bir kez kapatıp geri yükleyin, sonra tekrar bağlanın.",
@@ -149,7 +149,7 @@ function createClaudeCoordinator({
     if (state.desktop.blocked && state.desktop.installed) {
       throw codedError("CLAUDE_DESKTOP_BLOCKED", state.blockReason || "Claude Desktop şu an ayarlanamıyor.");
     }
-    if (!values?.model) throw codedError("MODEL_REQUIRED", "Önce bir model seçin.");
+    if (!values?.model) throw codedError("MODEL_REQUIRED", "Bu araç için uygun bir hesap modeli bulunamadı.");
 
     if (state.desktop.installed && state.desktop.running) {
       if (!closeRunning) {
@@ -168,7 +168,7 @@ function createClaudeCoordinator({
       report("configuring", "Claude Code CLI ayarlanıyor...");
       toolManager.applyTool(CLAUDE_CODE_TOOL_ID, values);
       cliApplied = true;
-      log?.info("claude", "Claude Code CLI bağlandı", { model: values.model });
+      log?.info("claude", "Claude Code CLI bağlandı", { defaultModel: values.model, modelCount: values.models?.length || 1 });
     }
 
     let desktopResult = null;
@@ -176,7 +176,8 @@ function createClaudeCoordinator({
       try {
         desktopResult = await claudeDesktop.apply(values, (phase, message, details) => report(phase, message, details));
         log?.info("claude", "Claude Desktop bağlandı", {
-          model: values.model,
+          defaultModel: values.model,
+          modelCount: values.models?.length || 1,
           launched: desktopResult?.launched === true,
           branding: desktopResult?.brandingStatus || null,
         });

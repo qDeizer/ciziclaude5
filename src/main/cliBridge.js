@@ -11,6 +11,13 @@ const STATE_FILE_NAME = "cli-bridge.json";
 const MAX_REQUEST_BYTES = 64 * 1024;
 const RENDERER_TIMEOUT_MS = 15000;
 const LONG_RENDERER_TIMEOUT_MS = 10 * 60 * 1000;
+const LONG_RENDERER_ACTIONS = new Set([
+  "claude-code-cli.install", "claude-code-cli.purge",
+  "claude-desktop.install", "claude-desktop.purge",
+  "codex-cli.install", "codex-cli.purge",
+  "codex-desktop.install", "codex-desktop.purge",
+  "tool.reconcile-all", "tool.claude.switch",
+]);
 
 function safeJson(value) {
   try {
@@ -157,7 +164,7 @@ class CliBridge {
     const requestId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
     const payload = { ...request, requestId };
     return new Promise((resolve, reject) => {
-      const timeoutMs = request?.type === "click" && ["claude-code-cli.install", "codex-cli.install"].includes(request?.id)
+      const timeoutMs = ["click", "switch"].includes(request?.type) && LONG_RENDERER_ACTIONS.has(request?.id)
         ? LONG_RENDERER_TIMEOUT_MS
         : RENDERER_TIMEOUT_MS;
       const timer = setTimeout(() => {

@@ -6,6 +6,14 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const codexConfig = require("../codexConfigFile");
+const codexModelCatalog = require("../codexModelCatalog");
+const log = require("../logger");
+const {
+  DEFAULT_COMPACT_TOKENS,
+  DEFAULT_REASONING_EFFORT,
+  capabilityFor,
+  longContextModelName,
+} = require("./modelCapabilities");
 // TOML is handled by codexConfigFile, which edits the shared Codex config in
 // place. A naive stringifier used to live here; it could not round-trip the
 // literal strings, arrays and quoted table names the Desktop app writes, so
@@ -44,10 +52,22 @@ function withoutV1(base) {
   return b.endsWith("/v1") ? b.slice(0, -3) : b;
 }
 
-// Tool definitions. values = { base, apiKey, model, opus, sonnet, haiku, models }
+function profileMap(values, toolId) {
+  const profiles = Array.isArray(values?.modelProfiles) && values.modelProfiles.length
+    ? values.modelProfiles
+    : (values?.models || [values?.model]).filter(Boolean).map((model) => capabilityFor(model, toolId));
+  return new Map(profiles.map((profile) => [profile.name, profile]));
+}
+
+function configuredClaudeModel(name, profiles) {
+  const profile = profiles.get(name) || capabilityFor(name, "claude-code");
+  return profile.supports1m ? longContextModelName(name) : name;
+}
+
+// Tool definitions. values = { base, apiKey, model, opus, sonnet, haiku, fable, models }
 //   base    - gateway origin (no /v1)
-//   model   - chosen model name for this tool
-//   opus/sonnet/haiku - model per Claude slot (Claude Code CLI only)
+//   model   - automatic default model for this tool
+//   opus/sonnet/haiku/fable - model per Claude slot (Claude Code CLI only)
 //   models  - model names available for multi-model tools
 const TOOLS = {
   "claude-code": {
@@ -56,17 +76,30 @@ const TOOLS = {
     apply(v) {
       const file = path.join(home(), ".claude", "settings.json");
       const cur = readJson(file) || {};
+      const profiles = profileMap(v, "claude-code");
+      const configuredModels = [...new Set((v.models || [v.model]).filter(Boolean)
+        .map((model) => configuredClaudeModel(model, profiles)))];
+      const nextEnv = {
+        ...(cur.env || {}),
+        ANTHROPIC_BASE_URL: withV1(v.base),
+        ANTHROPIC_AUTH_TOKEN: v.apiKey,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: configuredClaudeModel(v.opus || v.model, profiles),
+        ANTHROPIC_DEFAULT_SONNET_MODEL: configuredClaudeModel(v.sonnet || v.model, profiles),
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: configuredClaudeModel(v.haiku || v.model, profiles),
+        ANTHROPIC_DEFAULT_FABLE_MODEL: configuredClaudeModel(v.fable || v.model, profiles),
+        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(DEFAULT_COMPACT_TOKENS),
+      };
+      // A pre-existing user opt-out would hide every [1m] variant. The full
+      // original settings file is restored from the application backup when
+      // the integration is turned off.
+      delete nextEnv.CLAUDE_CODE_DISABLE_1M_CONTEXT;
       const next = {
         ...cur,
         hasCompletedOnboarding: true,
-        env: {
-          ...(cur.env || {}),
-          ANTHROPIC_BASE_URL: withV1(v.base),
-          ANTHROPIC_AUTH_TOKEN: v.apiKey,
-          ANTHROPIC_DEFAULT_OPUS_MODEL: v.opus || v.model,
-          ANTHROPIC_DEFAULT_SONNET_MODEL: v.sonnet || v.model,
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: v.haiku || v.model,
-        },
+        availableModels: configuredModels,
+        effortLevel: v.reasoningEffort || DEFAULT_REASONING_EFFORT,
+        env: nextEnv,
       };
       writeJson(file, next);
     },
@@ -78,20 +111,36 @@ const TOOLS = {
       const url = cfg?.env?.ANTHROPIC_BASE_URL;
       const complete = Boolean(url
         && cfg?.env?.ANTHROPIC_AUTH_TOKEN
+        && Array.isArray(cfg?.availableModels)
+        && cfg.availableModels.length > 0
         && cfg?.env?.ANTHROPIC_DEFAULT_OPUS_MODEL
         && cfg?.env?.ANTHROPIC_DEFAULT_SONNET_MODEL
-        && cfg?.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+        && cfg?.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL
+        && cfg?.env?.ANTHROPIC_DEFAULT_FABLE_MODEL
+        && cfg?.env?.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "1"
+        && cfg?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW === String(DEFAULT_COMPACT_TOKENS)
+        && cfg?.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT !== "1");
       if (!complete) return false;
       return expectedBase ? url === withV1(expectedBase) : true;
     },
     matches(v) {
       const cfg = readJson(path.join(home(), ".claude", "settings.json"));
       const env = cfg?.env || {};
+      const profiles = profileMap(v, "claude-code");
+      const expectedModels = [...new Set((v.models || [v.model]).filter(Boolean)
+        .map((model) => configuredClaudeModel(model, profiles)))];
       return env.ANTHROPIC_BASE_URL === withV1(v.base)
         && env.ANTHROPIC_AUTH_TOKEN === v.apiKey
-        && env.ANTHROPIC_DEFAULT_OPUS_MODEL === (v.opus || v.model)
-        && env.ANTHROPIC_DEFAULT_SONNET_MODEL === (v.sonnet || v.model)
-        && env.ANTHROPIC_DEFAULT_HAIKU_MODEL === (v.haiku || v.model);
+        && env.ANTHROPIC_DEFAULT_OPUS_MODEL === configuredClaudeModel(v.opus || v.model, profiles)
+        && env.ANTHROPIC_DEFAULT_SONNET_MODEL === configuredClaudeModel(v.sonnet || v.model, profiles)
+        && env.ANTHROPIC_DEFAULT_HAIKU_MODEL === configuredClaudeModel(v.haiku || v.model, profiles)
+        && env.ANTHROPIC_DEFAULT_FABLE_MODEL === configuredClaudeModel(v.fable || v.model, profiles)
+        && env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "1"
+        && env.CLAUDE_CODE_AUTO_COMPACT_WINDOW === String(DEFAULT_COMPACT_TOKENS)
+        && env.CLAUDE_CODE_DISABLE_1M_CONTEXT !== "1"
+        && Array.isArray(cfg?.availableModels)
+        && cfg.availableModels.length === expectedModels.length
+        && expectedModels.every((model) => cfg.availableModels.includes(model));
     },
     cleanup(expectedBase) {
       const file = path.join(home(), ".claude", "settings.json");
@@ -109,8 +158,15 @@ const TOOLS = {
       delete nextEnv.ANTHROPIC_DEFAULT_OPUS_MODEL;
       delete nextEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
       delete nextEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+      delete nextEnv.ANTHROPIC_DEFAULT_FABLE_MODEL;
+      delete nextEnv.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
+      if (nextEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW === String(DEFAULT_COMPACT_TOKENS)) {
+        delete nextEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+      }
 
       const next = { ...cfg };
+      delete next.availableModels;
+      if (next.effortLevel === DEFAULT_REASONING_EFFORT) delete next.effortLevel;
       if (Object.keys(nextEnv).length > 0) next.env = nextEnv;
       else delete next.env;
       writeJson(file, next);
@@ -125,21 +181,69 @@ const TOOLS = {
   // it while running.
   codex: {
     id: "codex", name: "Codex (CLI + ChatGPT Desktop)", apiType: "openai",
-    files: () => [codexConfig.configPath()],
+    files: () => [codexConfig.configPath(), codexModelCatalog.catalogPath()],
     surgicalRevert: true,
     apply(v) {
-      codexConfig.applyCizi({ base: v.base, apiKey: v.apiKey, model: v.model });
+      const catalogPath = codexModelCatalog.catalogPath();
+      let previousCatalog = null;
+      let catalogExisted = false;
+      try {
+        previousCatalog = fs.readFileSync(catalogPath, "utf8");
+        catalogExisted = true;
+      } catch { /* first Cizi catalog */ }
+      try {
+        const catalog = codexModelCatalog.buildCatalog(v.models, undefined, { profiles: v.modelProfiles });
+        const written = codexModelCatalog.writeCatalog(catalog);
+        codexConfig.applyCizi({
+          base: v.base,
+          apiKey: v.apiKey,
+          model: v.model,
+          modelCatalogPath: written.path,
+          contextWindowTokens: v.contextWindowTokens,
+          reasoningEffort: v.reasoningEffort,
+        });
+        log.success("codex", "Codex/ChatGPT model kataloğu, 1M context ve effort ayarları uygulandı", {
+          modelCount: written.count,
+          defaultModel: v.model,
+          contextWindowTokens: v.contextWindowTokens,
+          reasoningEffort: v.reasoningEffort,
+        });
+      } catch (error) {
+        try {
+          if (catalogExisted) fs.writeFileSync(catalogPath, previousCatalog, "utf8");
+          else fs.rmSync(catalogPath, { force: true });
+          log.warning("codex", "Codex yapılandırması tamamlanamadı; model kataloğu geri alındı", { rollback: true, modelCount: v.models?.length || 0 });
+        } catch (rollbackError) {
+          log.error("codex", "Codex model kataloğu geri alınamadı", { rollback: false, code: rollbackError?.code || null });
+        }
+        if (!error.userMessage) error.userMessage = "Codex model listesi uygulanamadı; önceki ayarlar geri yüklendi.";
+        throw error;
+      }
       // Pre-1.1 builds wrote a separate CLI profile. Leaving it behind would
       // let the two disagree about which gateway Codex should use.
       try { fs.rmSync(path.join(home(), ".codex", "cizicode.config.toml"), { force: true }); } catch { /* nothing to clean up */ }
     },
     isApplied(expectedBase) {
       const state = codexConfig.readState(expectedBase);
-      return state.applied && state.tokenConfigured && Boolean(state.model);
+      return state.applied
+        && state.tokenConfigured
+        && Boolean(state.model)
+        && state.modelCatalogPath === codexModelCatalog.catalogPath()
+        && Number(state.modelContextWindow) >= 1_000_000
+        && Number(state.autoCompactTokenLimit) > 0
+        && ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(state.reasoningEffort);
     },
     matches(v) {
       const state = codexConfig.readState(v.base);
-      return state.applied && state.tokenConfigured && state.model === v.model;
+      const actualModels = codexModelCatalog.readModelIds(state.modelCatalogPath);
+      const expectedModels = [...new Set((v.models || []).map((model) => String(model || "").trim()).filter(Boolean))];
+      return state.applied && state.tokenConfigured && state.model === v.model
+        && state.modelCatalogPath === codexModelCatalog.catalogPath()
+        && Number(state.modelContextWindow) >= 1_000_000
+        && Number(state.autoCompactTokenLimit) > 0
+        && ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(state.reasoningEffort)
+        && actualModels.length === expectedModels.length
+        && expectedModels.every((model) => actualModels.includes(model));
     },
     cleanup(expectedBase, { snapshot } = {}) {
       const state = codexConfig.readState();
@@ -153,7 +257,23 @@ const TOOLS = {
       }
       const previousContent = (snapshot?.files || []).find((f) => f.path === codexConfig.configPath() && f.existed)?.content;
       const previous = codexConfig.readPreviousFromSnapshot(previousContent);
-      return codexConfig.revertCizi({ previousModel: previous.model, previousModelProvider: previous.modelProvider });
+      const result = codexConfig.revertCizi({
+        previousModel: previous.model,
+        previousModelProvider: previous.modelProvider,
+        previousModelCatalogPath: previous.modelCatalogPath,
+        previousModelContextWindow: previous.modelContextWindow,
+        previousAutoCompactTokenLimit: previous.autoCompactTokenLimit,
+        previousReasoningEffort: previous.reasoningEffort,
+      });
+      const catalogSnapshot = (snapshot?.files || []).find((f) => f.path === codexModelCatalog.catalogPath());
+      if (catalogSnapshot?.existed) {
+        fs.mkdirSync(path.dirname(codexModelCatalog.catalogPath()), { recursive: true });
+        fs.writeFileSync(codexModelCatalog.catalogPath(), catalogSnapshot.content, "utf8");
+      } else {
+        fs.rmSync(codexModelCatalog.catalogPath(), { force: true });
+      }
+      log.info("codex", "Codex ayarları ve model kataloğu geri alındı", { restoredCatalog: catalogSnapshot?.existed === true });
+      return { ...result, catalogRestored: catalogSnapshot?.existed === true };
     },
   },
 

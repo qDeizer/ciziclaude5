@@ -21,6 +21,7 @@ const claudeLaunchGuard = require("./claudeLaunchGuard");
 const claudeLifecycle = require("./tools/claudeLifecycle");
 const reconcileBackgroundTask = require("./tools/claudeReconcileTask");
 const toolIntentStore = require("./tools/toolIntentStore");
+const { configurationForTool } = require("./tools/toolModelConfiguration");
 const { CLAUDE_INTENT_ID, createIntegrationReconciler } = require("./tools/integrationReconciler");
 const { createClaudeCoordinator } = require("./claudeCoordinator");
 const log = require("./logger");
@@ -60,7 +61,7 @@ if (!hasSingleInstanceLock) {
 
 const UPDATE_FEED_URL = process.env.CIZI_UPDATE_URL || "https://cizicode.me/desktop-updates";
 
-let session = null; // { baseUrl, apiKey }
+let session = null; // { baseUrl, apiKey, combos? }
 let updateState = { status: "idle", message: "" };
 let claudeInstallState = { status: "idle", phase: "idle", percent: 0, message: "" };
 let claudeInstallPromise = null;
@@ -820,6 +821,16 @@ function requireSession() {
   return session;
 }
 
+async function accountToolValues(toolId, currentModel = null) {
+  const s = requireSession();
+  if (!Array.isArray(s.combos)) {
+    const me = await api.getMe(s.baseUrl, s.apiKey);
+    s.combos = Array.isArray(me?.combos) ? me.combos : [];
+  }
+  const automatic = configurationForTool(toolId, s.combos, { currentModel });
+  return { base: api.TOOL_BASE_URL, apiKey: s.apiKey, ...automatic };
+}
+
 function wrap(label, handler) {
   return async (_evt, args) => {
     const t0 = Date.now();
@@ -840,7 +851,7 @@ ipcMain.handle("cizi:login", wrap("login", async ({ apiKey }) => {
   if (!apiKey) throw new Error("API key is required.");
   log.info("auth", "Login attempt");
   const me = await api.getMe(api.DEFAULT_BASE_URL, apiKey);
-  session = { baseUrl: api.DEFAULT_BASE_URL, apiKey };
+  session = { baseUrl: api.DEFAULT_BASE_URL, apiKey, combos: Array.isArray(me?.combos) ? me.combos : [] };
   store.saveSession({ apiKey });
   log.info("auth", `Login OK (models: ${(me?.combos || []).length})`);
   return me;
@@ -860,7 +871,9 @@ ipcMain.handle("cizi:getSession", wrap("getSession", async () => {
 
 ipcMain.handle("cizi:getMe", wrap("getMe", async () => {
   const s = requireSession();
-  return await api.getMe(s.baseUrl, s.apiKey);
+  const me = await api.getMe(s.baseUrl, s.apiKey);
+  s.combos = Array.isArray(me?.combos) ? me.combos : [];
+  return me;
 }));
 
 ipcMain.handle("cizi:getUsage", wrap("getUsage", async ({ period }) => {
@@ -884,7 +897,7 @@ ipcMain.handle("cizi:openClaudeCodeSite", wrap("openClaudeCodeSite", async () =>
 }));
 ipcMain.handle("cizi:getCodexCliStatus", wrap("getCodexCliStatus", async () => codexCli.detect()));
 ipcMain.handle("cizi:installCodexCli", wrap("installCodexCli", async () => codexCli.install()));
-ipcMain.handle("cizi:openCodexCli", wrap("openCodexCli", async ({ model, useCizi } = {}) => codexCli.open({ model, useCizi })));
+ipcMain.handle("cizi:openCodexCli", wrap("openCodexCli", async ({ useCizi } = {}) => codexCli.open({ useCizi })));
 ipcMain.handle("cizi:planCodexCliUninstall", wrap("planCodexCliUninstall", async () => {
   const desktop = await codexDesktop.detect();
   return codexCli.planUninstall({ desktopInstalled: desktop.installed });
@@ -907,23 +920,15 @@ ipcMain.handle("cizi:getClaudeState", wrap("getClaudeState", async () => {
 }));
 ipcMain.handle("cizi:getClaudeProgress", wrap("getClaudeProgress", async () => claudeProgressState));
 
-ipcMain.handle("cizi:connectClaude", wrap("connectClaude", async ({ model, models, closeRunning } = {}) => {
-  const s = requireSession();
-  if (!model) throw new Error("Önce bir model seçin.");
-  const values = {
-    base: api.TOOL_BASE_URL,
-    apiKey: s.apiKey,
-    model,
-    opus: model,
-    sonnet: model,
-    haiku: model,
-    models: Array.isArray(models) && models.length ? models : [model],
-  };
+ipcMain.handle("cizi:connectClaude", wrap("connectClaude", async ({ closeRunning } = {}) => {
+  const currentModel = toolIntentStore.get(CLAUDE_INTENT_ID)?.values?.model || null;
+  const values = await accountToolValues("claude-code", currentModel);
+  log.info("claude", "Uyumlu Claude modelleri otomatik yapılandırılıyor", { modelCount: values.models.length, defaultModel: values.model });
   try {
     const result = await claude.connect(values, { closeRunning: closeRunning === true });
     toolIntentStore.set(CLAUDE_INTENT_ID, true, values);
     await ensureReconcileMonitor();
-    return result;
+    return { ...result, modelCount: values.models.length, defaultModel: values.model };
   } catch (error) {
     // A failed two-product transaction means the visible switch remains off.
     // Persist that intent before the repair pass so a stranded CLI half is
@@ -989,19 +994,6 @@ ipcMain.handle("cizi:getCodexState", wrap("getCodexState", async () => {
   };
 }));
 
-// Switching models keeps one provider and changes only `model`. Both products
-// read the new value when they next start, so the caller is told to restart.
-ipcMain.handle("cizi:setCodexModel", wrap("setCodexModel", async ({ model } = {}) => {
-  const state = codexConfig.readState(api.TOOL_BASE_URL);
-  if (!state.applied) throw new Error("Model değiştirmeden önce Codex bağlantısını açın.");
-  const result = codexConfig.setModel(model);
-  const intent = toolIntentStore.get("codex");
-  if (intent?.enabled) toolIntentStore.set("codex", true, { ...intent.values, model });
-  const desktop = await codexDesktop.detect();
-  log.info("codex", "Codex modeli değiştirildi", { model: result.model, changed: result.changed });
-  return { ...result, restartRequired: desktop.installed, desktopInstalled: desktop.installed };
-}));
-
 ipcMain.handle("cizi:listTools", wrap("listTools", async () => toolMgr.listToolStatuses(api.TOOL_BASE_URL).map((status) => ({
   ...status,
   desiredEnabled: status.id === "claude-code"
@@ -1009,25 +1001,15 @@ ipcMain.handle("cizi:listTools", wrap("listTools", async () => toolMgr.listToolS
     : desiredToolState(status.id, status.applied),
 }))));
 
-ipcMain.handle("cizi:applyTool", wrap("applyTool", async ({ toolId, modelSlots }) => {
-  const s = requireSession();
-  const slots = modelSlots || {};
-  const values = {
-    base: api.TOOL_BASE_URL,
-    apiKey: s.apiKey,
-    model: slots.model,
-    opus: slots.opus || slots.model,
-    sonnet: slots.sonnet || slots.model,
-    haiku: slots.haiku || slots.model,
-    models: slots.models || (slots.model ? [slots.model] : []),
-  };
-  if (!values.model) throw new Error("Select a model first.");
-  log.info("tools", `Apply ${toolId}`, { model: values.model });
+ipcMain.handle("cizi:applyTool", wrap("applyTool", async ({ toolId }) => {
+  const currentModel = toolId === "codex" ? codexConfig.readState(api.TOOL_BASE_URL).model : toolIntentStore.get(toolId)?.values?.model;
+  const values = await accountToolValues(toolId, currentModel);
+  log.info("tools", `Apply ${toolId}`, { defaultModel: values.model, modelCount: values.models.length });
   const res = toolMgr.applyTool(toolId, values);
   toolIntentStore.set(toolId, true, values);
   await ensureReconcileMonitor();
-  log.info("tools", `Applied ${toolId}`, { hasBackup: res?.hasBackup });
-  return res;
+  log.success("tools", `Applied ${toolId}`, { hasBackup: res?.hasBackup, modelCount: values.models.length });
+  return { ...res, modelCount: values.models.length, defaultModel: values.model };
 }));
 
 ipcMain.handle("cizi:revertTool", wrap("revertTool", async ({ toolId }) => {

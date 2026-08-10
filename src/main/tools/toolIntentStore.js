@@ -25,7 +25,7 @@ function readState(options = {}) {
 
 function safeValues(values = {}) {
   const result = {};
-  for (const key of ["model", "opus", "sonnet", "haiku"]) {
+  for (const key of ["model", "opus", "sonnet", "haiku", "fable"]) {
     const value = String(values?.[key] || "").trim();
     if (value) result[key] = value;
   }

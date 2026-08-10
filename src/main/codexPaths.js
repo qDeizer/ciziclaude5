@@ -39,6 +39,7 @@ function sharedPaths() {
     root,
     configFile: path.join(root, "config.toml"),
     authFile: path.join(root, "auth.json"),
+    modelCatalogFile: path.join(root, "cizicode-models.json"),
   };
 }
 

@@ -194,6 +194,14 @@ function createClaudeDesktopBackend(overrides = {}) {
         throw codedError("CLAUDE_POLICY_VERIFY_FAILED", "Claude Desktop gateway settings could not be verified.");
       }
     }
+    log.success("claude-desktop", "Claude Desktop Chat, 1M context ve thinking ayarları doğrulandı", {
+      configurationSurface,
+      modelCount: models.length,
+      longContextModels: models.filter((model) => model.supports1m !== false).length,
+      chatEnabled: config.chatTabEnabled === true || config.chatTabEnabled === "true",
+      advancedFileAnalysis: config.chatAdvancedFileAnalysisEnabled === true
+        || config.chatAdvancedFileAnalysisEnabled === "true",
+    });
     onProgress("authenticating", "Preparing Claude Desktop authentication...");
     await adapters.helper.provision(resolvedHelper, values.apiKey);
     await adapters.helper.preflight(resolvedHelper);
@@ -227,7 +235,7 @@ function createClaudeDesktopBackend(overrides = {}) {
     if (runtime.running) throw codedError("PROCESS_RUNNING", "Claude Desktop must be closed before changing this setting.");
     const models = desktopModels(values);
     if (!models.length) {
-      throw codedError("CLAUDE_DESKTOP_MODEL_REQUIRED", "Select an available model before enabling Claude Desktop.");
+      throw codedError("CLAUDE_DESKTOP_MODEL_REQUIRED", "Claude Desktop için uygun bir hesap modeli bulunamadı.");
     }
 
     // Shortcut sessions are deliberately transient and never create, update,

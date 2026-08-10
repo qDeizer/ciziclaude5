@@ -310,8 +310,17 @@ async function cleanupOwnedPolicyOrphans(expectedBase, {
       inferenceCredentialHelperTtlSec: "300",
       modelDiscoveryEnabled: "false",
       disableDeploymentModeChooser: "true",
+      chatTabEnabled: "true",
+      chatAdvancedFileAnalysisEnabled: "true",
+      isDesktopExtensionEnabled: "true",
+      autoModeEnabled: "true",
+      toolSearchEnabled: "true",
+      disableBundledSkillsAndWorkflows: "false",
+      disableClaudeAiSignIn: "false",
+      disableClaudeDeepLinks: "false",
       isClaudeCodeForDesktopEnabled: "true",
       coworkTabEnabled: "true",
+      secureVmFeaturesEnabled: "true",
     };
     for (const [name, expected] of Object.entries(exactCompanions)) {
       const value = values[name];

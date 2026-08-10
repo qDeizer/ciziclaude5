@@ -26,9 +26,8 @@ tool, gateway, or other application services directly.
 npm run cli -- screen
 npm run cli -- list
 npm run cli -- click update-check
-npm run cli -- switch tool.claude-code-cli.switch off
+npm run cli -- switch tool.claude.switch off
 npm run cli -- switch tool.codex.switch on
-npm run cli -- select tool.codex.model gpt-5.6-terra
 npm run cli -- click codex-desktop.install
 npm run cli -- click codex-desktop.purge
 npm run cli -- select period-select 7d
@@ -52,18 +51,25 @@ Windows'ta iki yerel Codex ürünü vardır ve **ikisi de aynı çekirdeği** ç
 | Codex CLI | bağımsız `codex.exe` | resmî OpenAI yükleyicisi |
 
 Her ikisi de `%USERPROFILE%\.codex\config.toml` dosyasını okur, bu yüzden Cizi
-Code **tek bir switch** ile ikisini birden bağlar. Switch açıldığında yalnız üç
-şey yazılır — `model`, `model_provider` ve `[model_providers.cizicode]` bloğu.
+Code **tek bir switch** ile ikisini birden bağlar. Kullanıcı model seçmez: anahtarın
+Codex ile uyumlu bütün modelleri otomatik olarak `%USERPROFILE%\.codex\cizicode-models.json`
+kataloğuna eklenir. `config.toml` içinde otomatik varsayılan `model`,
+`model_catalog_json`, `model_provider`, `model_context_window = 1000000`,
+`model_auto_compact_token_limit = 950000`, `model_reasoning_effort` ve
+`[model_providers.cizicode]` bloğu yazılır. Katalogdaki her model, kurulu Codex
+sürümünün desteklediği effort seviyelerini taşır; aynı ortak config ve katalog
+hem Codex CLI hem de ChatGPT Desktop tarafından okunur.
 Dosyanın geri kalanı (Desktop'ın kendi `notify`, `mcp_servers`, `plugins`,
 `projects` ayarları dahil) bayt bayt korunur; her yazma öncesi zaman damgalı
 yedek alınır, sonrasında dosya geri okunup doğrulanır. API anahtarı doğrudan
 `experimental_bearer_token` alanına yazılır — ortam değişkeni veya `.env`
 kullanılmaz ve `auth.json` dosyasına dokunulmaz.
 
-Model değiştirmek sağlayıcıyı değiştirmez: yalnız `model` satırı güncellenir.
-ChatGPT Desktop kuruluysa arayüz, değişikliğin geçerli olması için uygulamayı
-yeniden başlatıp yeni bir Codex sohbeti açmayı hatırlatır. Switch kapatıldığında
-yalnız Cizi Code'un eklediği satırlar geri alınır ve `model` eski değerine döner.
+Codex CLI ve ChatGPT Desktop aynı kataloğu okuyarak tüm uygun modelleri model
+seçicisinde gösterir. ChatGPT Desktop kuruluysa arayüz, değişikliğin geçerli olması
+için uygulamayı yeniden başlatıp yeni bir Codex sohbeti açmayı hatırlatır. Switch
+kapatıldığında Cizi Code'un eklediği satırlar ve katalog geri alınır; önceki model,
+sağlayıcı ve katalog ayarları korunur.
 
 Kurulum ve kaldırma her ürün için ayrıdır. ChatGPT Desktop resmî Microsoft Store
 kaynağından kurulur (indirme ve kurulum ilerlemesi canlı gösterilir) ve
@@ -92,6 +98,17 @@ mekanizması kullanır. Claude Desktop modülü ciziClaude4'ten **olduğu gibi**
 taşındı — kendi işlem/geri alma döngüsü, baseline yedeği, otomatik güncelleme
 onarım görevi ve Türkçe arayüz paketi dahil.
 
+Model seçimi kullanıcıdan istenmez. Claude Code CLI, gateway model keşfini açar
+ve `availableModels` ile yalnız Claude-uyumlu erişilebilir modelleri listeler;
+Opus, Sonnet, Haiku ve Fable varsayılanları uygun aile modellerine otomatik
+eşlenir. Claude Desktop aynı uygun modellerin tamamını `inferenceModels` listesine
+yazar; ilk kayıt otomatik varsayılandır. Claude Code modelleri `[1m]` varyantıyla,
+`950000` otomatik sıkıştırma eşiği ve kalıcı effort varsayılanıyla kaydedilir.
+Claude Desktop tarafında her model `supports1m`/`prefer1m` ile işaretlenir; Chat,
+gelişmiş dosya analizi, extension, auto mode ve tool search yüzeyleri açılır.
+Thinking seviyeleri ve sohbet bağlam doluluğu Claude Desktop'ın kendi yerleşik
+model/seans arayüzü tarafından gösterilir.
+
 Koordinatör katmanı iki ürünü tek anahtar altında birleştirir:
 - **Bağlarken** önce CLI bağlanır; Desktop işlemi başarısız olursa CLI ayarı
   geri alınır, böylece yarım bağlantı oluşmaz.
@@ -109,6 +126,9 @@ Yardımcı dosyalar da taşındı: `src/main/bin/` içindeki
 - `src/main/tools/backup.js` — config dosyalarının tam yedeği; geri alımda **aynen** geri yükler. Ortak Codex config'i gibi, bağlıyken sahibi tarafından yazılmaya devam eden dosyalarda yedek geri yükleme yerine yalnız kendi anahtarlarını geri alan cerrahi yol kullanılır.
 - `src/main/codexPaths.js` — Desktop'a, CLI'ye ve ikisine birden ait yolların haritası; kaldırma planı buradan üretilir.
 - `src/main/codexConfigFile.js` — ortak `~/.codex/config.toml` üzerinde cerrahi düzenleme, yedekleme ve yazma sonrası doğrulama.
+- `src/main/codexModelCatalog.js` — kurulu Codex sürümünün model sözleşmesinden Cizi Code hesabına özel çoklu model kataloğu üretir.
+- `src/main/tools/toolModelConfiguration.js` — hesap modellerini araç ailesine göre süzer ve otomatik varsayılan/aile eşlemelerini tek yerde belirler.
+- `src/main/tools/modelCapabilities.js` — 1M bağlam, auto-compact ve araç bazlı thinking/effort seviyelerinin ortak sözleşmesi.
 - `src/main/codexDesktop.js` — ChatGPT Desktop tespiti, Microsoft Store kurulumu ve `Remove-AppxPackage` ile kaldırma.
 - `src/main/claudeCoordinator.js` — Claude Code CLI + Claude Desktop tek switch koordinatörü (sıralı bağlama, başarısızlıkta geri alma).
 - `src/main/tools/claude*.js` — Claude Desktop motoru: yaşam döngüsü, kurulum, kimlik doğrulama yardımcısı, politika/config library yüzeyi, dosya-tabanlı Türkçe markalama ve onarım görevi.

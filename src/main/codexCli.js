@@ -479,19 +479,16 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
     }).finally(() => { installPromise = null; });
     return installPromise;
   };
-  const open = async ({ model, useCizi = false } = {}) => {
+  const open = async ({ useCizi = false } = {}) => {
     const status = await detect();
     if (!status.installed || !status.command) throw new Error("Codex CLI is not installed on this computer.");
     // The Cizi Code provider now lives in the shared config.toml, which the CLI
     // reads on its own. A CLI-only profile could not reach ChatGPT Desktop, so
-    // no `--profile` is passed; only the model is forwarded, and only while the
-    // Cizi Code connection is on, since these model ids are gateway-specific.
+    // no `--profile` or `--model` is passed. The automatic default and the full
+    // picker catalog both come from the shared config.
     const connected = useCizi === true;
-    const selectedModel = connected ? String(model || "").trim() : "";
-    if (selectedModel && !/^[A-Za-z0-9._:-]+$/.test(selectedModel)) throw new Error("The selected Codex model is invalid.");
     const command = String(status.command);
     const args = [];
-    if (selectedModel) args.push("-m", selectedModel);
     // Codex is a console application.  Electron has no interactive console, so
     // ask Windows to create one while targeting the detected .exe itself.
     const startCommand = `start "" ${quoteCmdArgument(command)} ${args.map(quoteCmdArgument).join(" ")}`;
@@ -505,8 +502,8 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
       windowsVerbatimArguments: true,
     });
     child.unref();
-    log?.info("codex-cli", "Codex CLI açıldı", { command: status.command, connected, model: selectedModel || null, launch: "direct-exe-in-new-console" });
-    return { opened: true, command: status.command, connected, model: selectedModel || null };
+    log?.info("codex-cli", "Codex CLI açıldı", { command: status.command, connected, modelSelection: "shared-catalog", launch: "direct-exe-in-new-console" });
+    return { opened: true, command: status.command, connected, modelSelection: "shared-catalog" };
   };
   return {
     detect: detectCodexCli,

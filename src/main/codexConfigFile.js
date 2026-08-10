@@ -4,10 +4,14 @@
 // Desktop app actively writes its own keys into it (notify, mcp_servers,
 // plugins, projects, windows...).  Rewriting the whole file from a parsed
 // object would silently drop literal strings, quoted table names and comments,
-// so this module edits only the three things Cizi Code owns:
+// so this module edits only the following config areas Cizi Code owns:
 //
 //   model            (top level)
 //   model_provider   (top level)
+//   model_catalog_json (top level)
+//   model_context_window (top level)
+//   model_auto_compact_token_limit (top level)
+//   model_reasoning_effort (top level)
 //   [model_providers.cizicode]
 //
 // Every other byte of the user's config is left exactly as it was.  Each write
@@ -23,6 +27,14 @@ const PROVIDER_TABLE = `model_providers.${PROVIDER_ID}`;
 const WIRE_API = "responses";
 const BACKUP_PREFIX = "config.toml.backup-cizicode-";
 const KEEP_BACKUPS = 5;
+const OWNED_TOP_LEVEL_KEYS = Object.freeze([
+  "model",
+  "model_provider",
+  "model_catalog_json",
+  "model_context_window",
+  "model_auto_compact_token_limit",
+  "model_reasoning_effort",
+]);
 
 function configPath() {
   return sharedPaths().configFile;
@@ -73,7 +85,16 @@ function readTopLevelString(lines, key) {
   const index = topLevelKeyIndex(lines, key);
   if (index === -1) return null;
   const raw = lines[index].slice(lines[index].indexOf("=") + 1).trim().replace(/\s*#.*$/, "").trim();
-  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+  if (raw.startsWith('"') && raw.endsWith('"')) {
+    return raw.slice(1, -1).replace(/\\([\\"nrt])/g, (_match, escaped) => ({
+      "\\": "\\",
+      '"': '"',
+      n: "\n",
+      r: "\r",
+      t: "\t",
+    }[escaped]));
+  }
+  if (raw.startsWith("'") && raw.endsWith("'")) {
     return raw.slice(1, -1);
   }
   return raw || null;
@@ -87,6 +108,22 @@ function setTopLevelString(lines, key, value) {
     return lines;
   }
   // Insert after the last non-blank top-level line so the file keeps its shape.
+  const limit = topLevelEnd(lines);
+  let insertAt = limit;
+  while (insertAt > 0 && lines[insertAt - 1].trim() === "") insertAt -= 1;
+  lines.splice(insertAt, 0, line);
+  return lines;
+}
+
+function setTopLevelNumber(lines, key, value) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`'${key}' için pozitif bir tam sayı gerekli.`);
+  const line = `${key} = ${parsed}`;
+  const index = topLevelKeyIndex(lines, key);
+  if (index !== -1) {
+    lines[index] = line;
+    return lines;
+  }
   const limit = topLevelEnd(lines);
   let insertAt = limit;
   while (insertAt > 0 && lines[insertAt - 1].trim() === "") insertAt -= 1;
@@ -165,11 +202,9 @@ function pruneBackups() {
 function structuralProblem(text, expected) {
   const lines = splitLines(text);
   const limit = topLevelEnd(lines);
-  for (const key of ["model", "model_provider"]) {
-    const all = lines.filter((line) => new RegExp(`^\\s*${key}\\s*=`).test(line)).length;
+  for (const key of OWNED_TOP_LEVEL_KEYS) {
     const top = lines.slice(0, limit).filter((line) => new RegExp(`^\\s*${key}\\s*=`).test(line)).length;
     if (top > 1) return `'${key}' anahtarı birden fazla kez yazıldı`;
-    if (all > top) return `'${key}' anahtarı yanlış bölüme yazıldı`;
   }
   const headers = lines.filter((line) => providerHeaderIndex([line]) === 0).length;
   if (headers > 1) return "Cizi Code sağlayıcı bloğu birden fazla kez yazıldı";
@@ -204,7 +239,18 @@ function writeVerified(text, previousText, expected) {
 function readState(expectedBase) {
   const text = readConfigText();
   if (text == null) {
-    return { exists: false, model: null, modelProvider: null, hasProvider: false, baseUrl: null, applied: false };
+    return {
+      exists: false,
+      model: null,
+      modelProvider: null,
+      modelCatalogPath: null,
+      modelContextWindow: null,
+      autoCompactTokenLimit: null,
+      reasoningEffort: null,
+      hasProvider: false,
+      baseUrl: null,
+      applied: false,
+    };
   }
   const lines = splitLines(text);
   const range = providerBlockRange(lines);
@@ -219,6 +265,10 @@ function readState(expectedBase) {
     path: configPath(),
     model: readTopLevelString(lines, "model"),
     modelProvider,
+    modelCatalogPath: readTopLevelString(lines, "model_catalog_json"),
+    modelContextWindow: readTopLevelString(lines, "model_context_window"),
+    autoCompactTokenLimit: readTopLevelString(lines, "model_auto_compact_token_limit"),
+    reasoningEffort: readTopLevelString(lines, "model_reasoning_effort"),
     hasProvider,
     baseUrl,
     tokenConfigured: hasToken,
@@ -228,12 +278,30 @@ function readState(expectedBase) {
 
 // Point both Codex products at the Cizi Code gateway. Returns what the config
 // looked like beforehand so a later revert can restore those values precisely.
-function applyCizi({ base, apiKey, model }) {
+function applyCizi({
+  base,
+  apiKey,
+  model,
+  modelCatalogPath,
+  contextWindowTokens = 1_000_000,
+  reasoningEffort = "high",
+}) {
   const modelId = String(model || "").trim();
-  if (!modelId) throw new Error("Bir model seçilmeden Codex yapılandırılamaz.");
-  if (!/^[A-Za-z0-9._:-]+$/.test(modelId)) throw new Error("Seçilen Codex modeli geçersiz.");
+  if (!modelId) throw new Error("Uygun bir hesap modeli olmadan Codex yapılandırılamaz.");
+  if (!/^[A-Za-z0-9._:/@-]+$/.test(modelId)) throw new Error("Otomatik Codex model kimliği geçersiz.");
   const key = String(apiKey || "").trim();
   if (!key) throw new Error("Cizi Code API anahtarı olmadan Codex yapılandırılamaz.");
+  const catalogPath = String(modelCatalogPath || "").trim();
+  if (!catalogPath || !path.isAbsolute(catalogPath)) throw new Error("Codex model kataloğu için geçerli bir dosya yolu gerekli.");
+  const contextWindow = Number(contextWindowTokens);
+  if (!Number.isSafeInteger(contextWindow) || contextWindow < 1_000_000) {
+    throw new Error("Codex için en az 1M bağlam penceresi gerekli.");
+  }
+  const compactTokenLimit = Math.min(950_000, contextWindow - 50_000);
+  const effort = String(reasoningEffort || "high").trim().toLowerCase();
+  if (!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) {
+    throw new Error("Codex effort seviyesi geçersiz.");
+  }
   const baseUrl = withV1(base);
 
   const previousText = readConfigText();
@@ -243,6 +311,10 @@ function applyCizi({ base, apiKey, model }) {
   const lines = splitLines(previousText == null ? "" : previousText);
   setTopLevelString(lines, "model", modelId);
   setTopLevelString(lines, "model_provider", PROVIDER_ID);
+  setTopLevelString(lines, "model_catalog_json", catalogPath);
+  setTopLevelNumber(lines, "model_context_window", contextWindow);
+  setTopLevelNumber(lines, "model_auto_compact_token_limit", compactTokenLimit);
+  setTopLevelString(lines, "model_reasoning_effort", effort);
 
   const block = providerBlockLines({ baseUrl, apiKey: key });
   const range = providerBlockRange(lines);
@@ -254,17 +326,32 @@ function applyCizi({ base, apiKey, model }) {
   }
 
   const text = `${lines.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "")}\n`;
-  writeVerified(text, previousText, { model: modelId, provider: PROVIDER_ID });
+  writeVerified(text, previousText, {
+    model: modelId,
+    provider: PROVIDER_ID,
+    model_catalog_json: catalogPath,
+    model_context_window: String(contextWindow),
+    model_auto_compact_token_limit: String(compactTokenLimit),
+    model_reasoning_effort: effort,
+  });
 
   return {
     path: configPath(),
     backup,
     model: modelId,
+    modelCatalogPath: catalogPath,
+    modelContextWindow: contextWindow,
+    autoCompactTokenLimit: compactTokenLimit,
+    reasoningEffort: effort,
     baseUrl,
     previous: {
       existed: previousText != null,
       model: before.model,
       modelProvider: before.modelProvider,
+      modelCatalogPath: before.modelCatalogPath,
+      modelContextWindow: before.modelContextWindow,
+      autoCompactTokenLimit: before.autoCompactTokenLimit,
+      reasoningEffort: before.reasoningEffort,
       hadProvider: before.hasProvider,
     },
   };
@@ -274,7 +361,14 @@ function applyCizi({ base, apiKey, model }) {
 // come from the snapshot taken before the first apply; when they are unknown
 // the keys are dropped rather than guessed, which returns Codex to its own
 // defaults instead of pinning a model the user never chose.
-function revertCizi({ previousModel, previousModelProvider } = {}) {
+function revertCizi({
+  previousModel,
+  previousModelProvider,
+  previousModelCatalogPath,
+  previousModelContextWindow,
+  previousAutoCompactTokenLimit,
+  previousReasoningEffort,
+} = {}) {
   const previousText = readConfigText();
   if (previousText == null) return { changed: false, reason: "not-found" };
 
@@ -297,42 +391,76 @@ function revertCizi({ previousModel, previousModelProvider } = {}) {
     changed = true;
   }
 
-  if (previousModel != null && readTopLevelString(lines, "model") !== previousModel) {
-    setTopLevelString(lines, "model", previousModel);
+  if (previousModel != null) {
+    if (readTopLevelString(lines, "model") !== previousModel) {
+      setTopLevelString(lines, "model", previousModel);
+      changed = true;
+    }
+  } else if (removeTopLevelKey(lines, "model")) {
     changed = true;
   }
+
+  if (previousModelCatalogPath) {
+    if (readTopLevelString(lines, "model_catalog_json") !== previousModelCatalogPath) {
+      setTopLevelString(lines, "model_catalog_json", previousModelCatalogPath);
+      changed = true;
+    }
+  } else if (removeTopLevelKey(lines, "model_catalog_json")) {
+    changed = true;
+  }
+
+  if (previousModelContextWindow != null) {
+    if (readTopLevelString(lines, "model_context_window") !== String(previousModelContextWindow)) {
+      setTopLevelNumber(lines, "model_context_window", previousModelContextWindow);
+      changed = true;
+    }
+  } else if (removeTopLevelKey(lines, "model_context_window")) changed = true;
+
+  if (previousAutoCompactTokenLimit != null) {
+    if (readTopLevelString(lines, "model_auto_compact_token_limit") !== String(previousAutoCompactTokenLimit)) {
+      setTopLevelNumber(lines, "model_auto_compact_token_limit", previousAutoCompactTokenLimit);
+      changed = true;
+    }
+  } else if (removeTopLevelKey(lines, "model_auto_compact_token_limit")) changed = true;
+
+  if (previousReasoningEffort != null) {
+    if (readTopLevelString(lines, "model_reasoning_effort") !== String(previousReasoningEffort)) {
+      setTopLevelString(lines, "model_reasoning_effort", previousReasoningEffort);
+      changed = true;
+    }
+  } else if (removeTopLevelKey(lines, "model_reasoning_effort")) changed = true;
 
   if (!changed) return { changed: false, reason: "not-present", backup };
 
   const text = `${lines.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "")}\n`;
-  writeVerified(text, previousText, { model: previousModel });
+  writeVerified(text, previousText, {
+    model: previousModel,
+    model_context_window: previousModelContextWindow == null ? null : String(previousModelContextWindow),
+    model_auto_compact_token_limit: previousAutoCompactTokenLimit == null ? null : String(previousAutoCompactTokenLimit),
+    model_reasoning_effort: previousReasoningEffort,
+  });
   return { changed: true, path: configPath(), backup };
-}
-
-// Switching models keeps the provider block untouched; only the top-level
-// `model` value changes, which is what both products read on next start.
-function setModel(model) {
-  const modelId = String(model || "").trim();
-  if (!/^[A-Za-z0-9._:-]+$/.test(modelId)) throw new Error("Seçilen Codex modeli geçersiz.");
-  const previousText = readConfigText();
-  if (previousText == null) throw new Error("Codex yapılandırma dosyası bulunamadı.");
-  const backup = backupConfig();
-  const lines = splitLines(previousText);
-  const before = readTopLevelString(lines, "model");
-  if (before === modelId) return { changed: false, model: modelId, backup };
-  setTopLevelString(lines, "model", modelId);
-  writeVerified(`${lines.join("\n").replace(/\n+$/, "")}\n`, previousText, { model: modelId });
-  return { changed: true, model: modelId, previousModel: before, backup, path: configPath() };
 }
 
 // Reads the model / model_provider values out of a snapshot of the pre-Cizi
 // config, so a revert restores what the user actually had.
 function readPreviousFromSnapshot(content) {
-  if (content == null) return { model: null, modelProvider: null };
+  if (content == null) return {
+    model: null,
+    modelProvider: null,
+    modelCatalogPath: null,
+    modelContextWindow: null,
+    autoCompactTokenLimit: null,
+    reasoningEffort: null,
+  };
   const lines = splitLines(content);
   return {
     model: readTopLevelString(lines, "model"),
     modelProvider: readTopLevelString(lines, "model_provider"),
+    modelCatalogPath: readTopLevelString(lines, "model_catalog_json"),
+    modelContextWindow: readTopLevelString(lines, "model_context_window"),
+    autoCompactTokenLimit: readTopLevelString(lines, "model_auto_compact_token_limit"),
+    reasoningEffort: readTopLevelString(lines, "model_reasoning_effort"),
   };
 }
 
@@ -344,7 +472,6 @@ module.exports = {
   readState,
   applyCizi,
   revertCizi,
-  setModel,
   backupConfig,
   readPreviousFromSnapshot,
   withV1,
