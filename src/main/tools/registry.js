@@ -9,11 +9,12 @@ const codexConfig = require("../codexConfigFile");
 const codexModelCatalog = require("../codexModelCatalog");
 const log = require("../logger");
 const {
-  DEFAULT_COMPACT_TOKENS,
   DEFAULT_REASONING_EFFORT,
   capabilityFor,
+  compactWindowFor,
+  isReasoningLevel,
   longContextModelName,
-} = require("./modelCapabilities");
+} = require("../../renderer/modelCapabilities");
 // TOML is handled by codexConfigFile, which edits the shared Codex config in
 // place. A naive stringifier used to live here; it could not round-trip the
 // literal strings, arrays and quoted table names the Desktop app writes, so
@@ -59,9 +60,34 @@ function profileMap(values, toolId) {
   return new Map(profiles.map((profile) => [profile.name, profile]));
 }
 
+// Claude Code names the 1M-context variant `<model>[1m]`, but only sonnet,
+// opus and fable have one - its alias table has no `haiku[1m]`, so suffixing a
+// Haiku model yields an id nothing resolves. `longContextModelName` enforces
+// that; this only decides whether the variant is wanted at all.
 function configuredClaudeModel(name, profiles) {
   const profile = profiles.get(name) || capabilityFor(name, "claude-code");
-  return profile.supports1m ? longContextModelName(name) : name;
+  return profile.supports1m ? longContextModelName(name, profile.tier) : name;
+}
+
+// `availableModels` is an allow-list, not the picker's source list: Claude Code
+// matches family names, version prefixes and full ids against it, comparing
+// with the `[1m]` suffix stripped. So it gets the plain gateway ids, and both
+// context variants of each model stay reachable.
+function claudeAvailableModels(v) {
+  return [...new Set((v.models || [v.model]).filter(Boolean).map((model) => String(model).trim()))];
+}
+
+// One session-wide number, so it has to hold for every model the user can
+// switch to: the smallest window wins.
+function claudeCompactWindow(v, profiles) {
+  const windows = (v.models || [v.model]).filter(Boolean)
+    .map((model) => (profiles.get(model) || capabilityFor(model, "claude-code")).contextWindowTokens);
+  return compactWindowFor(windows.length ? Math.min(...windows) : undefined);
+}
+
+function claudeEffortLevel(v) {
+  const requested = String(v.reasoningEffort || "").trim().toLowerCase();
+  return isReasoningLevel(requested, "claude-code") ? requested : DEFAULT_REASONING_EFFORT;
 }
 
 // Tool definitions. values = { base, apiKey, model, opus, sonnet, haiku, fable, models }
@@ -77,8 +103,6 @@ const TOOLS = {
       const file = path.join(home(), ".claude", "settings.json");
       const cur = readJson(file) || {};
       const profiles = profileMap(v, "claude-code");
-      const configuredModels = [...new Set((v.models || [v.model]).filter(Boolean)
-        .map((model) => configuredClaudeModel(model, profiles)))];
       const nextEnv = {
         ...(cur.env || {}),
         ANTHROPIC_BASE_URL: withV1(v.base),
@@ -87,8 +111,10 @@ const TOOLS = {
         ANTHROPIC_DEFAULT_SONNET_MODEL: configuredClaudeModel(v.sonnet || v.model, profiles),
         ANTHROPIC_DEFAULT_HAIKU_MODEL: configuredClaudeModel(v.haiku || v.model, profiles),
         ANTHROPIC_DEFAULT_FABLE_MODEL: configuredClaudeModel(v.fable || v.model, profiles),
+        // Without this the CLI logs "Skipped gateway /v1/models" and the picker
+        // only ever offers the four alias defaults above.
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
-        CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(DEFAULT_COMPACT_TOKENS),
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(claudeCompactWindow(v, profiles)),
       };
       // A pre-existing user opt-out would hide every [1m] variant. The full
       // original settings file is restored from the application backup when
@@ -97,8 +123,8 @@ const TOOLS = {
       const next = {
         ...cur,
         hasCompletedOnboarding: true,
-        availableModels: configuredModels,
-        effortLevel: v.reasoningEffort || DEFAULT_REASONING_EFFORT,
+        availableModels: claudeAvailableModels(v),
+        effortLevel: claudeEffortLevel(v),
         env: nextEnv,
       };
       writeJson(file, next);
@@ -118,7 +144,7 @@ const TOOLS = {
         && cfg?.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL
         && cfg?.env?.ANTHROPIC_DEFAULT_FABLE_MODEL
         && cfg?.env?.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "1"
-        && cfg?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW === String(DEFAULT_COMPACT_TOKENS)
+        && Number(cfg?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW) > 0
         && cfg?.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT !== "1");
       if (!complete) return false;
       return expectedBase ? url === withV1(expectedBase) : true;
@@ -127,8 +153,7 @@ const TOOLS = {
       const cfg = readJson(path.join(home(), ".claude", "settings.json"));
       const env = cfg?.env || {};
       const profiles = profileMap(v, "claude-code");
-      const expectedModels = [...new Set((v.models || [v.model]).filter(Boolean)
-        .map((model) => configuredClaudeModel(model, profiles)))];
+      const expectedModels = claudeAvailableModels(v);
       return env.ANTHROPIC_BASE_URL === withV1(v.base)
         && env.ANTHROPIC_AUTH_TOKEN === v.apiKey
         && env.ANTHROPIC_DEFAULT_OPUS_MODEL === configuredClaudeModel(v.opus || v.model, profiles)
@@ -136,8 +161,9 @@ const TOOLS = {
         && env.ANTHROPIC_DEFAULT_HAIKU_MODEL === configuredClaudeModel(v.haiku || v.model, profiles)
         && env.ANTHROPIC_DEFAULT_FABLE_MODEL === configuredClaudeModel(v.fable || v.model, profiles)
         && env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === "1"
-        && env.CLAUDE_CODE_AUTO_COMPACT_WINDOW === String(DEFAULT_COMPACT_TOKENS)
+        && env.CLAUDE_CODE_AUTO_COMPACT_WINDOW === String(claudeCompactWindow(v, profiles))
         && env.CLAUDE_CODE_DISABLE_1M_CONTEXT !== "1"
+        && cfg?.effortLevel === claudeEffortLevel(v)
         && Array.isArray(cfg?.availableModels)
         && cfg.availableModels.length === expectedModels.length
         && expectedModels.every((model) => cfg.availableModels.includes(model));
@@ -160,13 +186,11 @@ const TOOLS = {
       delete nextEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
       delete nextEnv.ANTHROPIC_DEFAULT_FABLE_MODEL;
       delete nextEnv.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
-      if (nextEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW === String(DEFAULT_COMPACT_TOKENS)) {
-        delete nextEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
-      }
+      delete nextEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
 
       const next = { ...cfg };
       delete next.availableModels;
-      if (next.effortLevel === DEFAULT_REASONING_EFFORT) delete next.effortLevel;
+      delete next.effortLevel;
       if (Object.keys(nextEnv).length > 0) next.env = nextEnv;
       else delete next.env;
       writeJson(file, next);
@@ -229,9 +253,12 @@ const TOOLS = {
         && state.tokenConfigured
         && Boolean(state.model)
         && state.modelCatalogPath === codexModelCatalog.catalogPath()
-        && Number(state.modelContextWindow) >= 1_000_000
+        // The window is a per-model fact, so "connected" only requires a
+        // coherent pair: compaction has to start before the window is full.
+        && Number(state.modelContextWindow) > 0
         && Number(state.autoCompactTokenLimit) > 0
-        && ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(state.reasoningEffort);
+        && Number(state.autoCompactTokenLimit) < Number(state.modelContextWindow)
+        && isReasoningLevel(state.reasoningEffort, "codex");
     },
     matches(v) {
       const state = codexConfig.readState(v.base);
@@ -239,9 +266,11 @@ const TOOLS = {
       const expectedModels = [...new Set((v.models || []).map((model) => String(model || "").trim()).filter(Boolean))];
       return state.applied && state.tokenConfigured && state.model === v.model
         && state.modelCatalogPath === codexModelCatalog.catalogPath()
-        && Number(state.modelContextWindow) >= 1_000_000
+        && Number(state.modelContextWindow) === Number(profileMap(v, "codex").get(v.model)?.contextWindowTokens
+          || capabilityFor(v.model, "codex").contextWindowTokens)
         && Number(state.autoCompactTokenLimit) > 0
-        && ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(state.reasoningEffort)
+        && Number(state.autoCompactTokenLimit) < Number(state.modelContextWindow)
+        && isReasoningLevel(state.reasoningEffort, "codex")
         && actualModels.length === expectedModels.length
         && expectedModels.every((model) => actualModels.includes(model));
     },

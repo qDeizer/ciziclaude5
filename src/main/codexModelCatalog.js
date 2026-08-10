@@ -76,6 +76,30 @@ function templateFor(modelId, templates) {
   return scored[0]?.model || templates[0];
 }
 
+// The picker shows `display_name`, so dumping the raw id there is what made
+// entries read as "gpt-5.6-luna" next to Codex's own "GPT-5.6-Luna". An exact
+// template match keeps the real name; anything else is formatted the same way
+// Codex formats its own ids, and an id that is already a display name (spaces
+// or mixed case, e.g. "Sol 5.6") is left alone.
+function displayNameFor(modelId, source) {
+  const id = String(modelId).trim();
+  if (String(source?.slug || "").toLowerCase() === id.toLowerCase() && source?.display_name) {
+    return source.display_name;
+  }
+  if (/[\s]/.test(id) || /[a-z][A-Z]/.test(id)) return id;
+  return id.split(/([-_])/).map((part) => (
+    /^[-_]$/.test(part) ? "-"
+      : /^gpt$/i.test(part) ? "GPT"
+        : /^\d/.test(part) ? part
+          : part.charAt(0).toUpperCase() + part.slice(1)
+  )).join("");
+}
+
+function contextLabel(tokens) {
+  if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(1))}M`;
+  return `${Math.round(tokens / 1000)}K`;
+}
+
 function reasoningEntries(source, profile) {
   const sourceEntries = Array.isArray(source?.supported_reasoning_levels)
     ? source.supported_reasoning_levels
@@ -111,17 +135,22 @@ function buildCatalog(modelIds, templates = installedCatalog(), { profiles = [] 
       const defaultReasoningLevel = supportedEfforts.has(requestedEffort)
         ? requestedEffort
         : source.default_reasoning_level;
-      const contextWindow = Number(profile?.contextWindowTokens) || Number(source.context_window) || 1_000_000;
-      const maxContextWindow = Math.max(contextWindow, Number(profile?.maxContextWindowTokens) || 0);
+      const contextWindow = Number(profile?.contextWindowTokens) || Number(source.context_window);
+      const maxContextWindow = Math.max(
+        contextWindow,
+        Number(profile?.maxContextWindowTokens) || 0,
+        Number(source.max_context_window) || 0,
+      );
+      const efforts = [...supportedEfforts];
       return {
         ...JSON.parse(JSON.stringify(source)),
         slug: modelId,
-        display_name: modelId,
+        display_name: displayNameFor(modelId, source),
         context_window: contextWindow,
         max_context_window: maxContextWindow,
         default_reasoning_level: defaultReasoningLevel,
         supported_reasoning_levels: supportedReasoningLevels,
-        description: "Cizi Code hesabınızla kullanılabilir · 1M bağlam · ayarlanabilir effort.",
+        description: `Cizi Code · ${contextLabel(contextWindow)} bağlam · ${efforts.length} effort seviyesi`,
         visibility: "list",
         supported_in_api: true,
         priority: index + 1,

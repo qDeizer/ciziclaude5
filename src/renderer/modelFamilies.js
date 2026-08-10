@@ -10,9 +10,12 @@
     "claude-code": ["opus", "sonnet", "haiku", "fable", "anthropic", "claude"],
     codex: ["gpt", "openai", "codex", "luna", "terra", "sol", "astra"],
   };
+  const CLAUDE_ONLY_KEYWORDS = ["opus", "sonnet", "haiku", "fable", "anthropic", "claude"];
 
   function modelName(model) {
-    return typeof model === "string" ? model : model && model.name;
+    return typeof model === "string"
+      ? model
+      : model && (model.name || model.id || model.slug || model.model);
   }
 
   function modelNames(models) {
@@ -24,8 +27,13 @@
   // match "resolve"). A token that starts with the keyword still counts,
   // because the gateway also names models like "gpt5-luna".
   function modelBelongsToFamily(name, toolId) {
-    const keywords = MODEL_FAMILY_KEYWORDS[toolId] || [];
     const tokens = String(name || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    // Codex and Claude share one account model response. Exclude Claude
+    // families explicitly before checking broad OpenAI gateway aliases so a
+    // provider-supplied id can never leak into the Codex catalog again.
+    if (toolId === "codex" && tokens.some((token) => CLAUDE_ONLY_KEYWORDS
+      .some((keyword) => token === keyword || token.startsWith(keyword)))) return false;
+    const keywords = MODEL_FAMILY_KEYWORDS[toolId] || [];
     return tokens.some((token) => keywords.some((keyword) => token === keyword || token.startsWith(keyword)));
   }
 

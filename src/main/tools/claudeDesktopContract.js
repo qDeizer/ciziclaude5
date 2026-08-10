@@ -1,15 +1,45 @@
 // Pure contract for the Claude Desktop integration. Keeping policy/state
 // construction free of Electron, registry and filesystem access makes the
 // ON/OFF orchestrator smaller and lets tests prove exactly what Cizi owns.
+//
+// Every key below is a real Claude Desktop managed-config key, checked against
+// the app's own config schema. That check removed four keys an earlier version
+// wrote:
+//
+//   disableBundledSkillsAndWorkflows -> no such key (the real one is
+//                                       `disableBundledSkills`)
+//   disableClaudeAiSignIn            -> no such key; that setting *is*
+//                                       `disableDeploymentModeChooser`
+//   disableClaudeDeepLinks           -> no such key (the real one is
+//                                       `disableDeepLinkRegistration`)
+//   secureVmFeaturesEnabled          -> first-party deployments only, not
+//                                       valid on a gateway deployment
+//
+// Two more real keys are deliberately left alone rather than forced on:
+// `toolSearchEnabled` makes sessions send experimental anthropic-beta headers
+// and fields that a strict gateway answers with HTTP 400, and `autoModeEnabled`
+// needs a model with safety-classifier support. Both default to off in the app;
+// Cizi does not override that.
 
-// 6: model entries now carry 1M/default metadata and the managed surface owns
-// the Chat and advanced-analysis feature switches as well as the gateway.
-const { capabilityFor } = require("./modelCapabilities");
+// 7: the managed surface writes only verified keys, and model entries assert
+// 1M support per model instead of for everything.
+const { capabilityFor, tierFor, CLAUDE_TIERS } = require("../../renderer/modelCapabilities");
 
-const STATE_SCHEMA_VERSION = 6;
+const STATE_SCHEMA_VERSION = 7;
 const DIRECT_GATEWAY_MODE = "direct-gateway";
 const CONFIG_LIBRARY_SURFACE = "config-library";
-const CONFIG_KEYS = Object.freeze([
+
+// The surfaces Cizi turns on. Anything not listed keeps Claude Desktop's own
+// default, which is the only behaviour we can promise still works.
+const MANAGED_FEATURES = Object.freeze({
+  chatTabEnabled: true,
+  chatAdvancedFileAnalysisEnabled: true,
+  coworkTabEnabled: true,
+  isClaudeCodeForDesktopEnabled: true,
+  isDesktopExtensionEnabled: true,
+});
+
+const CONNECTION_KEYS = Object.freeze([
   "inferenceProvider",
   "inferenceGatewayBaseUrl",
   "inferenceGatewayAuthScheme",
@@ -20,17 +50,24 @@ const CONFIG_KEYS = Object.freeze([
   "inferenceModels",
   "modelDiscoveryEnabled",
   "disableDeploymentModeChooser",
-  "chatTabEnabled",
-  "chatAdvancedFileAnalysisEnabled",
-  "isDesktopExtensionEnabled",
+]);
+
+// Keys earlier Cizi builds wrote. They are still captured and still cleaned up
+// so an upgrade removes them from the user's machine instead of leaving unknown
+// values behind in the Claude policy key.
+const RETIRED_KEYS = Object.freeze([
   "autoModeEnabled",
   "toolSearchEnabled",
+  "secureVmFeaturesEnabled",
   "disableBundledSkillsAndWorkflows",
   "disableClaudeAiSignIn",
   "disableClaudeDeepLinks",
-  "isClaudeCodeForDesktopEnabled",
-  "coworkTabEnabled",
-  "secureVmFeaturesEnabled",
+]);
+
+const CONFIG_KEYS = Object.freeze([
+  ...CONNECTION_KEYS,
+  ...Object.keys(MANAGED_FEATURES),
+  ...RETIRED_KEYS,
 ]);
 
 function withV1(base) {
@@ -43,6 +80,15 @@ function claudeGatewayRoot(base) {
   return normalized.replace(/\/v1$/i, "");
 }
 
+// Claude Desktop's model list. Per its own schema:
+//   name                - must be the exact id the gateway's /v1/models returns
+//   anthropicFamilyTier - lets bare aliases ("opus") resolve to this entry
+//   isFamilyDefault     - picks the winner when several entries share a tier,
+//                         and is only meaningful alongside a tier
+//   supports1m          - a capability assertion about the deployment
+//   prefer1m            - only affects the default (first) entry, and only when
+//                         supports1m is set
+//   labelOverride       - display only, for ids the picker cannot name itself
 function normalizedModels(values) {
   const candidates = [values?.model, ...(Array.isArray(values?.models) ? values.models : [])].filter(Boolean);
   const profiles = new Map((values?.modelProfiles || []).map((profile) => [String(profile?.name || ""), profile]));
@@ -52,34 +98,31 @@ function normalizedModels(values) {
     const name = typeof value === "string" ? value.trim() : String(value?.name || "").trim();
     if (!name || seen.has(name)) return null;
     seen.add(name);
-    const explicitTier = typeof value === "object" ? String(value.tier || value.anthropicFamilyTier || "").toLowerCase() : "";
-    const inferredTier = ["opus", "sonnet", "haiku", "fable"].find((candidate) =>
-      new RegExp(`(^|[^a-z0-9])${candidate}([^a-z0-9]|$)`, "i").test(name));
-    const tier = explicitTier || inferredTier || "";
     const profile = profiles.get(name) || capabilityFor(value, "claude-code");
-    const familyDefault = index === 0 || (tier && !seenTiers.has(tier));
+    const tier = CLAUDE_TIERS.includes(profile.tier) ? profile.tier : tierFor(value);
+    const isFamilyDefault = Boolean(tier) && !seenTiers.has(tier);
     if (tier) seenTiers.add(tier);
     return {
       name,
-      labelOverride: name,
-      ...(["opus", "sonnet", "haiku", "fable"].includes(tier) ? { tier } : {}),
-      supports1m: profile.supports1m,
-      prefer1m: profile.supports1m,
-      isFamilyDefault: Boolean(familyDefault),
+      ...(CLAUDE_TIERS.includes(tier) ? { tier, isFamilyDefault } : {}),
+      supports1m: profile.supports1m === true,
+      // The picker only honours prefer1m on the default entry, so asserting it
+      // anywhere else is noise in the config the user has to read.
+      prefer1m: index === 0 && profile.supports1m === true,
     };
   }).filter(Boolean);
 }
 
 function inferenceModel(model) {
+  const tier = CLAUDE_TIERS.includes(model.tier)
+    ? model.tier
+    : CLAUDE_TIERS.includes(model.anthropicFamilyTier) ? model.anthropicFamilyTier : "";
   return {
     name: model.name,
-    labelOverride: model.labelOverride || model.name,
-    ...(model.tier ? { anthropicFamilyTier: model.tier } : {}),
-    // Schema-5 state records predate these fields. Missing values migrate to
-    // the new 1M/default contract during the next verified repair.
-    supports1m: model.supports1m !== false,
-    prefer1m: model.prefer1m !== false,
-    isFamilyDefault: model.isFamilyDefault !== false,
+    ...(model.labelOverride && model.labelOverride !== model.name ? { labelOverride: model.labelOverride } : {}),
+    ...(tier ? { anthropicFamilyTier: tier, isFamilyDefault: model.isFamilyDefault === true } : {}),
+    supports1m: model.supports1m === true,
+    ...(model.prefer1m === true ? { prefer1m: true } : {}),
   };
 }
 
@@ -99,17 +142,7 @@ function buildPolicyConfig(values, models, resolvedHelperPath) {
     inferenceModels: JSON.stringify(models.map(inferenceModel)),
     modelDiscoveryEnabled: "false",
     disableDeploymentModeChooser: "true",
-    chatTabEnabled: "true",
-    chatAdvancedFileAnalysisEnabled: "true",
-    isDesktopExtensionEnabled: "true",
-    autoModeEnabled: "true",
-    toolSearchEnabled: "true",
-    disableBundledSkillsAndWorkflows: "false",
-    disableClaudeAiSignIn: "false",
-    disableClaudeDeepLinks: "false",
-    isClaudeCodeForDesktopEnabled: "true",
-    coworkTabEnabled: "true",
-    secureVmFeaturesEnabled: "true",
+    ...Object.fromEntries(Object.entries(MANAGED_FEATURES).map(([key, on]) => [key, String(on)])),
   };
 }
 
@@ -126,17 +159,7 @@ function buildConfigLibraryConfig(values, models, resolvedHelperPath) {
     modelDiscoveryEnabled: false,
     inferenceModels: models.map(inferenceModel),
     disableDeploymentModeChooser: true,
-    chatTabEnabled: true,
-    chatAdvancedFileAnalysisEnabled: true,
-    isDesktopExtensionEnabled: true,
-    autoModeEnabled: true,
-    toolSearchEnabled: true,
-    disableBundledSkillsAndWorkflows: false,
-    disableClaudeAiSignIn: false,
-    disableClaudeDeepLinks: false,
-    isClaudeCodeForDesktopEnabled: true,
-    coworkTabEnabled: true,
-    secureVmFeaturesEnabled: true,
+    ...MANAGED_FEATURES,
   };
 }
 
@@ -195,10 +218,14 @@ module.exports = {
   DIRECT_GATEWAY_MODE,
   CONFIG_LIBRARY_SURFACE,
   CONFIG_KEYS,
+  CONNECTION_KEYS,
+  MANAGED_FEATURES,
+  RETIRED_KEYS,
   withV1,
   claudeGatewayRoot,
   normalizedModels,
   desktopModels,
+  inferenceModel,
   buildPolicyConfig,
   buildConfigLibraryConfig,
   assertDirectGatewayConfig,

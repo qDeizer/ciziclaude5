@@ -28,7 +28,14 @@ const CODEX_DESKTOP_NAME = "ChatGPT Desktop";
 var FIRST_RELEASE_TOOLS = [CLAUDE_CODE_CLI_TOOL_ID, CODEX_CLI_TOOL_ID];
 
 // The key's own model list decides which local products it may configure.
-const { modelNames, modelsForTool, toolIsUnlocked, toolIsGated } = window.ciziModelFamilies;
+const { modelName, modelNames, modelBelongsToFamily, modelsForTool, toolIsUnlocked, toolIsGated } = window.ciziModelFamilies;
+// Same module the main process uses to build the configs, so the screen and the
+// files on disk can never describe a model differently.
+const { capabilityFor } = window.ciziModelCapabilities;
+
+function contextLabel(tokens) {
+  return tokens >= 1_000_000 ? `${Number((tokens / 1_000_000).toFixed(1))}M` : `${Math.round(tokens / 1000)}K`;
+}
 
 function clog(level, msg, meta) {
   try {
@@ -176,11 +183,17 @@ function renderModels(models) {
     return;
   }
   for (const model of models) {
-    const name = typeof model === "string" ? model : model.name;
+    // The account list mixes both families, and the thinking levels differ per
+    // family, so the chip has to be read with the right tool's contract.
+    const toolId = modelBelongsToFamily(modelName(model), "codex") ? "codex" : "claude-code";
+    const profile = capabilityFor(model, toolId);
     const c = document.createElement("div");
     c.className = "chip";
-    c.textContent = `${name} · 1M · effort`;
-    c.title = "Bu model araç içinde 1M bağlam ve desteklenen düşünme seviyeleriyle yapılandırılır";
+    // Only what the model actually has: claiming 1M on every chip made the list
+    // meaningless once models with a smaller window appeared.
+    c.textContent = `${profile.name} · ${contextLabel(profile.contextWindowTokens)}`;
+    c.title = `${profile.name} · ${profile.contextWindowTokens.toLocaleString("tr-TR")} token bağlam`
+      + ` · düşünme seviyeleri: ${profile.reasoningLevels.join(", ")}`;
     box.appendChild(c);
   }
 }
@@ -518,15 +531,26 @@ function button({ label, className, cliId, cliLabel, title, onClick, long }) {
   return element;
 }
 
+// Summarises what will actually be written for this tool, so the row cannot
+// promise a capability the config does not carry.
 function automaticModelSummary(models, toolId) {
-  const count = modelNames(models).length;
+  const profiles = (models || []).map((model) => capabilityFor(model, toolId));
   const summary = document.createElement("span");
   summary.className = "tool-model-summary";
+  if (!profiles.length) {
+    summary.textContent = "Uyumlu model yok";
+    summary.title = "Bu araç için uygun model bulunamadı";
+    return summary;
+  }
   const thinkingLabel = toolId === "claude-code" ? "thinking" : "effort";
-  summary.textContent = count ? `${count} model · 1M · ${thinkingLabel}` : "Uyumlu model yok";
-  summary.title = count
-    ? `Bu araca uygun modellerin tamamı 1M bağlam ve desteklenen ${thinkingLabel} seviyeleriyle otomatik eklenir`
-    : "Bu araç için uygun model bulunamadı";
+  const smallest = Math.min(...profiles.map((profile) => profile.contextWindowTokens));
+  const largest = Math.max(...profiles.map((profile) => profile.contextWindowTokens));
+  const windowLabel = smallest === largest
+    ? contextLabel(largest)
+    : `${contextLabel(smallest)}-${contextLabel(largest)}`;
+  summary.textContent = `${profiles.length} model · ${windowLabel} · ${thinkingLabel}`;
+  summary.title = `${profiles.map((profile) => profile.name).join(", ")}`
+    + ` — hepsi otomatik eklenir, ${thinkingLabel} seviyesi modelin desteklediği aralıktan seçilir`;
   return summary;
 }
 

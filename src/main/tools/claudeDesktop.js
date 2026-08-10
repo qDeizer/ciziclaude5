@@ -197,7 +197,7 @@ function createClaudeDesktopBackend(overrides = {}) {
     log.success("claude-desktop", "Claude Desktop Chat, 1M context ve thinking ayarları doğrulandı", {
       configurationSurface,
       modelCount: models.length,
-      longContextModels: models.filter((model) => model.supports1m !== false).length,
+      longContextModels: models.filter((model) => model.supports1m === true).length,
       chatEnabled: config.chatTabEnabled === true || config.chatTabEnabled === "true",
       advancedFileAnalysis: config.chatAdvancedFileAnalysisEnabled === true
         || config.chatAdvancedFileAnalysisEnabled === "true",

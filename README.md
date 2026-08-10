@@ -54,11 +54,15 @@ Her ikisi de `%USERPROFILE%\.codex\config.toml` dosyasını okur, bu yüzden Ciz
 Code **tek bir switch** ile ikisini birden bağlar. Kullanıcı model seçmez: anahtarın
 Codex ile uyumlu bütün modelleri otomatik olarak `%USERPROFILE%\.codex\cizicode-models.json`
 kataloğuna eklenir. `config.toml` içinde otomatik varsayılan `model`,
-`model_catalog_json`, `model_provider`, `model_context_window = 1000000`,
-`model_auto_compact_token_limit = 950000`, `model_reasoning_effort` ve
-`[model_providers.cizicode]` bloğu yazılır. Katalogdaki her model, kurulu Codex
-sürümünün desteklediği effort seviyelerini taşır; aynı ortak config ve katalog
-hem Codex CLI hem de ChatGPT Desktop tarafından okunur.
+`model_catalog_json`, `model_provider`, `model_context_window`,
+`model_auto_compact_token_limit`, `model_reasoning_effort` ve
+`[model_providers.cizicode]` bloğu yazılır. Bağlam penceresi sabit değildir:
+modelin gerçek penceresi yazılır ve otomatik sıkıştırma eşiği bunun altında
+kalacak şekilde hesaplanır — sabit bir 1M/950k çifti, penceresi daha küçük bir
+modelde hiç sıkıştırma yapılmamasına ve oturumun sağlayıcı hatasıyla düşmesine
+yol açardı. Katalogdaki her model, kurulu Codex sürümünün desteklediği effort
+seviyelerini ve kendi görünen adını taşır; aynı ortak config ve katalog hem
+Codex CLI hem de ChatGPT Desktop tarafından okunur.
 Dosyanın geri kalanı (Desktop'ın kendi `notify`, `mcp_servers`, `plugins`,
 `projects` ayarları dahil) bayt bayt korunur; her yazma öncesi zaman damgalı
 yedek alınır, sonrasında dosya geri okunup doğrulanır. API anahtarı doğrudan
@@ -98,16 +102,24 @@ mekanizması kullanır. Claude Desktop modülü ciziClaude4'ten **olduğu gibi**
 taşındı — kendi işlem/geri alma döngüsü, baseline yedeği, otomatik güncelleme
 onarım görevi ve Türkçe arayüz paketi dahil.
 
-Model seçimi kullanıcıdan istenmez. Claude Code CLI, gateway model keşfini açar
-ve `availableModels` ile yalnız Claude-uyumlu erişilebilir modelleri listeler;
-Opus, Sonnet, Haiku ve Fable varsayılanları uygun aile modellerine otomatik
-eşlenir. Claude Desktop aynı uygun modellerin tamamını `inferenceModels` listesine
-yazar; ilk kayıt otomatik varsayılandır. Claude Code modelleri `[1m]` varyantıyla,
-`950000` otomatik sıkıştırma eşiği ve kalıcı effort varsayılanıyla kaydedilir.
-Claude Desktop tarafında her model `supports1m`/`prefer1m` ile işaretlenir; Chat,
-gelişmiş dosya analizi, extension, auto mode ve tool search yüzeyleri açılır.
-Thinking seviyeleri ve sohbet bağlam doluluğu Claude Desktop'ın kendi yerleşik
-model/seans arayüzü tarafından gösterilir.
+Model seçimi kullanıcıdan istenmez. Claude Code CLI'de model listesini
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` doldurur; `availableModels` bunun
+üzerine bir **izin listesidir**, yani anahtarın çağıramayacağı bir model
+seçilemez. Opus, Sonnet, Haiku ve Fable varsayılanları uygun aile modellerine
+eşlenir. 1M bağlam varyantı `[1m]` sonekiyle yalnız sonnet/opus/fable için
+yazılır — Claude Code'un alias tablosunda `haiku[1m]` yoktur, yazılsa hiçbir
+yerde çözülemeyen bir kimlik olurdu. Otomatik sıkıştırma eşiği, kullanıcının
+geçebileceği en küçük pencereye göre hesaplanır. Effort varsayılanı Claude
+Code'un kendi kümesinden (`low`/`medium`/`high`/`xhigh`/`max`) seçilir.
+
+Claude Desktop aynı modellerin tamamını `inferenceModels` listesine yazar; ilk
+kayıt varsayılandır, `supports1m` yalnız gerçekten 1M varyantı olan modellere,
+`prefer1m` ise yalnız varsayılan kayda konur. Açılan yüzeyler: Chat, gelişmiş
+dosya analizi, Cowork, Claude Code sekmesi ve masaüstü uzantıları. `toolSearch`
+ve `autoMode` bilerek açılmaz — ilki gateway'in kabul etmediği deneysel
+`anthropic-beta` başlıkları gönderttiği için istekleri HTTP 400'e düşürebilir,
+ikincisi sınıflandırıcı desteği olan bir model ister. Thinking seviyeleri ve
+sohbet bağlam doluluğu Claude Desktop'ın kendi model/seans arayüzünde görünür.
 
 Koordinatör katmanı iki ürünü tek anahtar altında birleştirir:
 - **Bağlarken** önce CLI bağlanır; Desktop işlemi başarısız olursa CLI ayarı
@@ -128,7 +140,7 @@ Yardımcı dosyalar da taşındı: `src/main/bin/` içindeki
 - `src/main/codexConfigFile.js` — ortak `~/.codex/config.toml` üzerinde cerrahi düzenleme, yedekleme ve yazma sonrası doğrulama.
 - `src/main/codexModelCatalog.js` — kurulu Codex sürümünün model sözleşmesinden Cizi Code hesabına özel çoklu model kataloğu üretir.
 - `src/main/tools/toolModelConfiguration.js` — hesap modellerini araç ailesine göre süzer ve otomatik varsayılan/aile eşlemelerini tek yerde belirler.
-- `src/main/tools/modelCapabilities.js` — 1M bağlam, auto-compact ve araç bazlı thinking/effort seviyelerinin ortak sözleşmesi.
+- `src/renderer/modelCapabilities.js` — bağlam penceresi, auto-compact eşiği, 1M varyant kuralı ve araç bazlı thinking/effort seviyelerinin ortak sözleşmesi. Ana süreç ve arayüz aynı dosyayı kullanır, böylece ekranda yazan ile dosyaya yazılan ayrışamaz.
 - `src/main/codexDesktop.js` — ChatGPT Desktop tespiti, Microsoft Store kurulumu ve `Remove-AppxPackage` ile kaldırma.
 - `src/main/claudeCoordinator.js` — Claude Code CLI + Claude Desktop tek switch koordinatörü (sıralı bağlama, başarısızlıkta geri alma).
 - `src/main/tools/claude*.js` — Claude Desktop motoru: yaşam döngüsü, kurulum, kimlik doğrulama yardımcısı, politika/config library yüzeyi, dosya-tabanlı Türkçe markalama ve onarım görevi.

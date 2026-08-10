@@ -20,6 +20,7 @@
 const fs = require("fs");
 const path = require("path");
 const { sharedPaths } = require("./codexPaths");
+const { ONE_MILLION_TOKENS, compactWindowFor, isReasoningLevel } = require("../renderer/modelCapabilities");
 
 const PROVIDER_ID = "cizicode";
 const PROVIDER_NAME = "Cizi Code";
@@ -283,23 +284,29 @@ function applyCizi({
   apiKey,
   model,
   modelCatalogPath,
-  contextWindowTokens = 1_000_000,
+  contextWindowTokens = ONE_MILLION_TOKENS,
   reasoningEffort = "high",
 }) {
   const modelId = String(model || "").trim();
   if (!modelId) throw new Error("Uygun bir hesap modeli olmadan Codex yapılandırılamaz.");
-  if (!/^[A-Za-z0-9._:/@-]+$/.test(modelId)) throw new Error("Otomatik Codex model kimliği geçersiz.");
+  // Account model ids are not always slug-shaped ("Sol 5.6"), and the catalog
+  // already carries them verbatim, so the default model must accept the same
+  // set. Only characters that would break the TOML line are rejected.
+  if (!/^[^\u0000-\u001f\u007f"'\\]+$/.test(modelId)) throw new Error("Otomatik Codex model kimliği geçersiz.");
   const key = String(apiKey || "").trim();
   if (!key) throw new Error("Cizi Code API anahtarı olmadan Codex yapılandırılamaz.");
   const catalogPath = String(modelCatalogPath || "").trim();
   if (!catalogPath || !path.isAbsolute(catalogPath)) throw new Error("Codex model kataloğu için geçerli bir dosya yolu gerekli.");
+  // The window is whatever the model really has. Pinning a floor here is what
+  // let a 1M limit be written for a 272k model, which meant Codex never
+  // compacted and the session failed on a provider error instead.
   const contextWindow = Number(contextWindowTokens);
-  if (!Number.isSafeInteger(contextWindow) || contextWindow < 1_000_000) {
-    throw new Error("Codex için en az 1M bağlam penceresi gerekli.");
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) {
+    throw new Error("Codex için geçerli bir bağlam penceresi gerekli.");
   }
-  const compactTokenLimit = Math.min(950_000, contextWindow - 50_000);
+  const compactTokenLimit = compactWindowFor(contextWindow);
   const effort = String(reasoningEffort || "high").trim().toLowerCase();
-  if (!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) {
+  if (!isReasoningLevel(effort, "codex")) {
     throw new Error("Codex effort seviyesi geçersiz.");
   }
   const baseUrl = withV1(base);

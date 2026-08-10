@@ -5,6 +5,8 @@ const lifecycle = require("./claudeLifecycle");
 const credential = require("./claudeDesktopCredential");
 const {
   CONFIG_KEYS,
+  MANAGED_FEATURES,
+  RETIRED_KEYS,
   withV1,
   normalizedGateway,
   validCiziModels,
@@ -257,9 +259,15 @@ async function restorePolicySnapshot(snapshot, {
 async function applyPolicyConfig(config) {
   // Use reg.exe argument arrays. Values are data arguments, never PowerShell
   // source, so endpoint/model text cannot become executable input.
-  try {
-    await execFileAsync("reg.exe", ["delete", POLICY_KEY, "/v", "inferenceGatewayApiKey", "/f"], { windowsHide: true, timeout: 10000 });
-  } catch { /* already absent */ }
+  // The API key never belongs in the policy key, and the retired values are
+  // ones earlier Cizi builds wrote that Claude Desktop does not recognise (or
+  // does not accept on a gateway deployment). Re-applying has to clear them,
+  // otherwise an upgraded install keeps carrying them forever.
+  for (const stale of ["inferenceGatewayApiKey", ...RETIRED_KEYS]) {
+    try {
+      await execFileAsync("reg.exe", ["delete", POLICY_KEY, "/v", stale, "/f"], { windowsHide: true, timeout: 10000 });
+    } catch { /* already absent */ }
+  }
   for (const [name, value] of Object.entries(config)) {
     await execFileAsync("reg.exe", ["add", POLICY_KEY, "/v", name, "/t", "REG_SZ", "/d", String(value), "/f"], {
       windowsHide: true,
@@ -303,6 +311,9 @@ async function cleanupOwnedPolicyOrphans(expectedBase, {
   if (ownedBase) remove.add("inferenceGatewayBaseUrl");
   if (ownedHelper) {
     remove.add("inferenceCredentialHelper");
+    // Values recognised as ours, so they are removed rather than left behind.
+    // RETIRED_KEYS are the ones earlier builds wrote and this one no longer
+    // does; they stay listed here precisely so an upgrade cleans them up.
     const exactCompanions = {
       inferenceProvider: "gateway",
       inferenceGatewayAuthScheme: "bearer",
@@ -310,17 +321,13 @@ async function cleanupOwnedPolicyOrphans(expectedBase, {
       inferenceCredentialHelperTtlSec: "300",
       modelDiscoveryEnabled: "false",
       disableDeploymentModeChooser: "true",
-      chatTabEnabled: "true",
-      chatAdvancedFileAnalysisEnabled: "true",
-      isDesktopExtensionEnabled: "true",
+      ...Object.fromEntries(Object.entries(MANAGED_FEATURES).map(([key, on]) => [key, String(on)])),
       autoModeEnabled: "true",
       toolSearchEnabled: "true",
+      secureVmFeaturesEnabled: "true",
       disableBundledSkillsAndWorkflows: "false",
       disableClaudeAiSignIn: "false",
       disableClaudeDeepLinks: "false",
-      isClaudeCodeForDesktopEnabled: "true",
-      coworkTabEnabled: "true",
-      secureVmFeaturesEnabled: "true",
     };
     for (const [name, expected] of Object.entries(exactCompanions)) {
       const value = values[name];
