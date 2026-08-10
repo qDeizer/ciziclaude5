@@ -144,6 +144,11 @@ Koordinatör katmanı iki ürünü tek anahtar altında birleştirir:
   alınır — iki taraf birbirinden habersiz bağlı kalamaz.
 - Desktop güncellemeleri ayarları ezebildiği için arayüzde **Onar** eylemi
   vardır; tek tıkla Cizi Code ayarları yeniden uygulanır.
+- **Anahtar Claude Desktop'ı açmaz.** Claude Desktop yönetilen ayarlarını
+  yalnızca açılışta okuduğu için anahtar, çalışan bir örneği kapatmak zorunda;
+  ardından yeniden başlatmak uygulamanın kendiliğinden açılması gibi
+  görünüyordu. Uygulamayı yalnızca kısayol ve arayüzdeki **Aç** düğmesi
+  başlatır.
 
 Yardımcı dosyalar da taşındı: `src/main/bin/` içindeki
 `CiziClaudeCredentialHelper.exe` ve C# kaynak kodu.

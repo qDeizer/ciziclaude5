@@ -175,10 +175,11 @@ function createClaudeCoordinator({
     if (state.desktop.installed) {
       try {
         desktopResult = await claudeDesktop.apply(values, (phase, message, details) => report(phase, message, details));
+        // Connecting configures Claude Desktop without opening it; the app is
+        // started only from the shortcut/launch action.
         log?.info("claude", "Claude Desktop bağlandı", {
           defaultModel: values.model,
           modelCount: values.models?.length || 1,
-          launched: desktopResult?.launched === true,
           branding: desktopResult?.brandingStatus || null,
         });
       } catch (error) {

@@ -337,18 +337,17 @@ function createClaudeDesktopBackend(overrides = {}) {
         adapters.state.write({ ...nextState, phase: "degraded", lastErrorCode: "CLAUDE_LEGACY_MIGRATION_FAILED" });
         throw codedError("CLAUDE_LEGACY_MIGRATION_FAILED", "Claude Desktop was connected, but old Cizi launcher files could not be removed.");
       }
-      let launched = true;
-      let launchErrorCode = null;
-      try {
+      // Turning the switch on configures Claude Desktop; it does not open it.
+      // Claude Desktop reads its managed configuration once at startup, so the
+      // switch has to close a running instance to apply anything - starting it
+      // again afterwards made the app appear on its own, which is not something
+      // the user asked for. `launch` (the shortcut and the button behind it) is
+      // the only path that starts Claude, and a session started that way is
+      // where a failure to launch still has to fail the transaction.
+      let launched = false;
+      if (sessionMode) {
         await adapters.runtime.launchChat(main.appUserModelId);
-      } catch (launchError) {
-        // A shortcut session exists to start a configured Claude; if it cannot
-        // start, let the outer transaction restore the captured surface rather
-        // than leave a half-started session behind.
-        if (sessionMode) throw launchError;
-        launched = false;
-        launchErrorCode = String(launchError?.code || "CLAUDE_DESKTOP_LAUNCH_FAILED");
-        adapters.state.write({ ...nextState, lastLaunchErrorCode: launchErrorCode });
+        launched = true;
       }
       return {
         ok: true,
@@ -358,7 +357,6 @@ function createClaudeDesktopBackend(overrides = {}) {
         backend: "original-package",
         appUserModelId: main.appUserModelId,
         launched,
-        ...(launchErrorCode ? { launchErrorCode } : {}),
         automaticUpdateReconcile: sessionMode ? false : reconcileTaskResult.current !== false,
         automaticBrandingRepair: !sessionMode && brandingTaskResult?.current === true,
         redirectedShortcuts: shortcutResult?.redirected || 0,

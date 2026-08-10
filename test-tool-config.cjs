@@ -45,6 +45,15 @@ function check(name, fn) {
   }
 }
 
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    results.push([true, name]);
+  } catch (error) {
+    results.push([false, `${name}\n    ${error.message.split("\n")[0]}`]);
+  }
+}
+
 // ---------------------------------------------------------------- capabilities
 check("Claude Code effort levels are its own enum, not Codex's", () => {
   assert.deepStrictEqual([...capabilities.CLAUDE_REASONING_LEVELS], ["low", "medium", "high", "xhigh", "max"]);
@@ -291,9 +300,109 @@ if (codexApplied) {
   });
 }
 
-fs.rmSync(SANDBOX, { recursive: true, force: true });
+// ------------------------------------------------------- Claude Desktop launch
+// Turning the switch on must configure Claude Desktop without opening it. The
+// backend takes injected adapters, so this drives a real apply() against fakes
+// and asserts nothing ever reached the launcher.
+async function claudeDesktopLaunchChecks() {
+  const { createClaudeDesktopBackend } = require("./src/main/tools/claudeDesktop");
+  const calls = [];
+  const main = {
+    packageFullName: "AnthropicClaude_1.0.0_x64__x",
+    packageFamilyName: "AnthropicClaude_x",
+    publisher: "CN=Anthropic",
+    version: "1.0.0",
+    installLocation: "C:\Claude",
+    appUserModelId: "AnthropicClaude_x!App",
+    installKind: "msix",
+    executable: "C:\Claude\claude.exe",
+    asar: null,
+  };
+  const state = { record: null, baseline: null };
+  const backend = createClaudeDesktopBackend({
+    features: { branding: false, configurationSurface: "config-library" },
+    runtime: {
+      getStatus: async () => ({ installed: true, running: false, main }),
+      launchOriginal: async () => { calls.push("launchOriginal"); },
+      launchChat: async () => { calls.push("launchChat"); },
+    },
+    policy: {
+      machineBlock: async () => ({ blocked: false }),
+      capture: async () => ({ keyExisted: false, values: {} }),
+      restore: async () => {},
+      apply: async () => {},
+      verify: async () => true,
+      cleanupOwnedOrphans: async () => ({ cleaned: false, removed: [] }),
+    },
+    configLibrary: {
+      capture: () => ({ configurationId: "x", metadata: { existed: false }, entry: { existed: false } }),
+      restore: () => {},
+      matches: () => true,
+      apply: () => { calls.push("configApply"); },
+      verify: () => true,
+      cleanupOwned: () => ({ removed: false }),
+    },
+    helper: {
+      capture: () => ({ files: [] }),
+      restore: () => {},
+      ensure: () => "C:\helper.exe",
+      provision: async () => {},
+      isCurrent: () => true,
+      preflight: async () => {},
+      path: () => "C:\helper.exe",
+    },
+    branding: { setDesired: () => {}, ensureForMain: async () => ({ status: "inactive" }), workRoot: () => "C:\work" },
+    brandingTask: { ensure: async () => ({ current: true }), remove: async () => {}, getStatus: async () => ({ exists: false, current: true }), isCurrent: async () => true },
+    shortcuts: { redirect: async () => ({ redirected: 0 }), restore: async () => {}, getStatus: async () => ({}) },
+    legacy: { cleanupLegacy: () => {} },
+    reconcileTask: { ensure: async () => ({ current: true }), remove: async () => {}, getStatus: async () => ({ exists: false, current: true }) },
+    // acquire() resolves to the release function itself, not a wrapper.
+    operationLock: { acquire: async () => () => {} },
+    state: {
+      read: () => state.record,
+      write: (value) => { state.record = value; },
+      readBaseline: () => state.baseline,
+      writeBaseline: (value) => { state.baseline = value; },
+      remove: () => { state.record = null; state.baseline = null; },
+      hasBaseline: () => state.baseline !== null,
+    },
+    identity: {
+      mainPackageIdentity: () => main,
+      assertMainPackagePreserved: () => {},
+      CLAUDE_MAIN_APP_ID: main.appUserModelId,
+    },
+    now: () => "2026-01-01T00:00:00.000Z",
+  });
 
-const failed = results.filter(([ok]) => !ok);
-for (const [ok, name] of results) console.log(`  ${ok ? "ok  " : "FAIL"} ${name}`);
-console.log(`\n${results.length - failed.length}/${results.length} passed`);
-process.exit(failed.length ? 1 : 0);
+  let applyResult = null;
+  let applyError = null;
+  try {
+    applyResult = await backend.apply({ base: BASE, apiKey: KEY, ...claudeValues });
+  } catch (error) {
+    applyError = error;
+  }
+
+  check("connecting configures Claude Desktop without opening it", () => {
+    assert.strictEqual(applyError, null, `apply threw: ${applyError && applyError.message}`);
+    assert.ok(calls.includes("configApply"), "the managed configuration must still be written");
+    assert.ok(!calls.includes("launchChat"), `launchChat must not run on connect (calls: ${calls.join(",")})`);
+    assert.ok(!calls.includes("launchOriginal"), `launchOriginal must not run on connect (calls: ${calls.join(",")})`);
+    assert.strictEqual(applyResult.launched, false);
+  });
+
+  await checkAsync("the explicit launch action still opens Claude Desktop", async () => {
+    calls.length = 0;
+    const result = await backend.launch();
+    assert.ok(calls.includes("launchChat") || calls.includes("launchOriginal"), "launch() must start Claude");
+    assert.strictEqual(result.launched, true);
+  });
+}
+
+claudeDesktopLaunchChecks().then(() => {
+  fs.rmSync(SANDBOX, { recursive: true, force: true });
+  const failed = results.filter(([ok]) => !ok);
+  for (const [ok, name] of results) console.log(`  ${ok ? "ok  " : "FAIL"} ${name}`);
+  console.log(`
+${results.length - failed.length}/${results.length} passed`);
+  process.exit(failed.length ? 1 : 0);
+});
