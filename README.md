@@ -101,8 +101,7 @@ Koordinatör katmanı iki ürünü tek anahtar altında birleştirir:
   vardır; tek tıkla Cizi Code ayarları yeniden uygulanır.
 
 Yardımcı dosyalar da taşındı: `src/main/bin/` içindeki
-`CiziClaudeCredentialHelper.exe`, `CiziClaudeRuntimeHost.exe` (C# kaynaklarıyla)
-ve `gateway-branding.js`, ayrıca `claudeOverlayTrust.json`.
+`CiziClaudeCredentialHelper.exe` ve C# kaynak kodu.
 
 ## Mimari
 - `src/main/` — Electron ana süreç. `apiClient.js` yalnızca holder-scoped uçları çağırır (`/api/me`, `/api/usage/me`, `/api/cli-tools/templates`). Backend'e erişim yoktur.
@@ -112,7 +111,7 @@ ve `gateway-branding.js`, ayrıca `claudeOverlayTrust.json`.
 - `src/main/codexConfigFile.js` — ortak `~/.codex/config.toml` üzerinde cerrahi düzenleme, yedekleme ve yazma sonrası doğrulama.
 - `src/main/codexDesktop.js` — ChatGPT Desktop tespiti, Microsoft Store kurulumu ve `Remove-AppxPackage` ile kaldırma.
 - `src/main/claudeCoordinator.js` — Claude Code CLI + Claude Desktop tek switch koordinatörü (sıralı bağlama, başarısızlıkta geri alma).
-- `src/main/tools/claude*.js` — ciziClaude4'ten taşınan Claude Desktop motoru: yaşam döngüsü, kurulum, kimlik doğrulama yardımcısı, politika/config library yüzeyi, Türkçe arayüz paketi, onarım görevi.
+- `src/main/tools/claude*.js` — Claude Desktop motoru: yaşam döngüsü, kurulum, kimlik doğrulama yardımcısı, politika/config library yüzeyi, dosya-tabanlı Türkçe markalama ve onarım görevi.
 - `src/renderer/` — Cizi Code temalı arayüz (vanilla JS, framework yok).
 
 ## Güvenlik

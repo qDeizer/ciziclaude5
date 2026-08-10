@@ -34,7 +34,6 @@ const DESKTOP_MESSAGES = {
   CLAUDE_DESKTOP_DETECTION_FAILED: "Cizi Code Claude Desktop'ı doğrulayamadı. Tekrar deneyin.",
   CLAUDE_DESKTOP_MODEL_REQUIRED: "Claude Desktop'ı bağlamadan önce bir model seçin.",
   TOOL_OPERATION_IN_PROGRESS: "Claude Desktop üzerinde başka bir işlem sürüyor. Bitmesini bekleyin.",
-  CLAUDE_TRANSLATION_UNAVAILABLE: "Bu Claude Desktop sürümü için doğrulanmış arayüz paketi henüz yok.",
   CLAUDE_STATE_UNREADABLE: "Claude Desktop entegrasyon kaydı okunamıyor. Anahtarı kapatın; kayıtlı orijinal ayarlar geri yüklenecek.",
   CLAUDE_DESKTOP_DISCONNECT_PENDING: "Önceki bağlantı tam kapatılmamış; orijinal ayarlarınız hâlâ yedekte duruyor. Anahtarı bir kez kapatıp geri yükleyin, sonra tekrar bağlanın.",
   CLAUDE_BASELINE_RESTORE_VERIFY_FAILED: "Claude Desktop'ın orijinal ayarları birebir geri yüklenemedi. Tekrar deneyin.",
