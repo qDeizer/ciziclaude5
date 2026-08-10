@@ -1,7 +1,8 @@
 const lifecycle = require("./claudeLifecycle");
-const runtimeHost = require("./claudeDesktopRuntimeHost");
 const packageIdentity = require("./claudePackageIdentity");
-const overlay = require("./claudeDesktopTranslation");
+const branding = require("./claudeDesktopBranding");
+const brandingTask = require("./claudeBrandingTask");
+const shortcuts = require("./claudeShortcuts");
 const legacy = require("./claudeDesktopLegacy");
 const reconcileTask = require("./claudeReconcileTask");
 const integrationLock = require("./integrationLock");
@@ -22,7 +23,7 @@ const {
   assertDirectGatewayConfig,
   CONFIG_LIBRARY_SURFACE,
   buildMainState,
-  overlayState,
+  brandingState,
 } = require("./claudeDesktopContract");
 
 function codedError(code, message) {
@@ -34,17 +35,17 @@ function codedError(code, message) {
 function createDefaultAdapters() {
   return {
     features: {
-      // Gateway configuration stays bootstrap-free. Shortcut sessions use
-      // verified runtime console branding; the signed overlay remains an
-      // optional legacy/direct-mode fallback.
-      translation: true,
+      // Gateway configuration stays bootstrap-free. Branding is a single
+      // mechanism now: the installed Claude package's own text files are
+      // patched, so every launch path shows the same label and there is no
+      // second, launch-dependent branding mode to keep in sync.
+      branding: true,
       configurationSurface: CONFIG_LIBRARY_SURFACE,
     },
     runtime: {
       getStatus: () => lifecycle.getRuntimeStatus("claude-desktop"),
       launchOriginal: (appUserModelId) => lifecycle.launchAppUserModelId(appUserModelId),
       launchChat: (appUserModelId) => lifecycle.launchClaudeNewChat(appUserModelId),
-      launchCiziRuntime: (appUserModelId) => runtimeHost.launchCiziRuntime(appUserModelId),
     },
     policy: {
       machineBlock: policy.machinePolicyBlock,
@@ -70,7 +71,25 @@ function createDefaultAdapters() {
       preflight: credential.preflightCredentialHelper,
       path: credential.helperPath,
     },
-    overlay,
+    branding,
+    // The branding repair task is what keeps the labels alive when Claude
+    // updates while Cizi Code is closed. It is deliberately separate from the
+    // configuration reconcile task: this one must run as SYSTEM to write inside
+    // the installed package, that one must run as the user to read HKCU.
+    brandingTask: {
+      ensure: () => brandingTask.ensure({ workRoot: branding.workRoot() }),
+      remove: () => brandingTask.remove({ workRoot: branding.workRoot() }),
+      getStatus: () => brandingTask.getStatus({ workRoot: branding.workRoot() }),
+      isCurrent: () => brandingTask.isCurrent({ workRoot: branding.workRoot() }),
+    },
+    // Shortcut redirection is the second, best-effort guard. It never decides
+    // whether the switch succeeded: a machine with no Claude .lnk at all (the
+    // normal case for an MSIX install) is a valid, fully working outcome.
+    shortcuts: {
+      redirect: (main) => shortcuts.redirect(main, { workRoot: branding.workRoot() }),
+      restore: () => shortcuts.restore({ workRoot: branding.workRoot() }),
+      getStatus: () => shortcuts.getStatus({ workRoot: branding.workRoot() }),
+    },
     legacy,
     reconcileTask,
     operationLock: {
@@ -100,6 +119,8 @@ function mergeAdapters(overrides = {}) {
     configLibrary: { ...defaults.configLibrary, ...(overrides.configLibrary || {}) },
     helper: { ...defaults.helper, ...(overrides.helper || {}) },
     reconcileTask: { ...defaults.reconcileTask, ...(overrides.reconcileTask || {}) },
+    brandingTask: { ...defaults.brandingTask, ...(overrides.brandingTask || {}) },
+    shortcuts: { ...defaults.shortcuts, ...(overrides.shortcuts || {}) },
     operationLock: { ...defaults.operationLock, ...(overrides.operationLock || {}) },
     state: { ...defaults.state, ...(overrides.state || {}) },
     identity: { ...defaults.identity, ...(overrides.identity || {}) },
@@ -154,9 +175,7 @@ function createClaudeDesktopBackend(overrides = {}) {
     return { runtime, main: adapters.identity.mainPackageIdentity(runtime) };
   }
 
-  async function configure(values, models, main, onProgress, previousState = null, {
-    runtimeBranding = false,
-  } = {}) {
+  async function configure(values, models, main, onProgress, previousState = null) {
     onProgress("configuring", "Configuring the original Claude Desktop package...");
     const resolvedHelper = adapters.helper.ensure();
     const configurationSurface = previousState?.configurationSurface
@@ -178,26 +197,23 @@ function createClaudeDesktopBackend(overrides = {}) {
     onProgress("authenticating", "Preparing Claude Desktop authentication...");
     await adapters.helper.provision(resolvedHelper, values.apiKey);
     await adapters.helper.preflight(resolvedHelper);
-    let translation = runtimeBranding ? {
-      status: "active",
-      installed: false,
-      package: null,
-      mode: "runtime-devtools",
-      message: "Cizi Code branding will be injected at runtime when Claude starts.",
-    } : {
+    let translation = {
       status: "inactive",
       installed: false,
       package: null,
       mode: "none",
       message: "Direct gateway mode leaves the Claude interface unchanged.",
     };
-    if (!runtimeBranding && adapters.features.translation) {
-      onProgress("translating", "Checking the optional Turkish interface package for this Claude version...");
-      translation = await adapters.overlay.ensureForMain(main, { state: previousState });
-      if (translation?.status !== "active" || !translation?.package) {
+    if (adapters.features.branding) {
+      onProgress("branding", "Applying the Turkish interface labels to Claude Desktop...");
+      // Idempotent: an already-branded install is only verified, not rewritten.
+      // The engine decides from file hashes, so a Claude update is detected here
+      // even when nothing else changed.
+      translation = await adapters.branding.ensureForMain(main, { state: previousState });
+      if (translation?.status !== "active") {
         throw codedError(
-          "CLAUDE_TRANSLATION_UNAVAILABLE",
-          "A verified Turkish interface package is not available for this Claude Desktop version yet.",
+          "CLAUDE_BRANDING_UNAVAILABLE",
+          "Cizi Code could not apply the Turkish interface labels to this Claude Desktop version.",
         );
       }
     }
@@ -257,15 +273,13 @@ function createClaudeDesktopBackend(overrides = {}) {
     const rollbackSurface = wasActive ? await surface.capture() : baseline;
     let translation = null;
     let reconcileTaskResult = null;
+    let brandingTaskResult = null;
+    let shortcutResult = null;
+    const brandingTaskBefore = sessionMode
+      ? { exists: false, current: true }
+      : await adapters.brandingTask.getStatus();
     try {
-      ({ translation } = await configure(
-        values,
-        models,
-        main,
-        onProgress,
-        previousState,
-        { runtimeBranding: sessionMode },
-      ));
+      ({ translation } = await configure(values, models, main, onProgress, previousState));
       const after = await adapters.runtime.getStatus();
       adapters.identity.assertMainPackagePreserved(main, after, "apply");
       const nextState = {
@@ -277,16 +291,31 @@ function createClaudeDesktopBackend(overrides = {}) {
         baseUrl: claudeGatewayRoot(values.base),
         models,
         configurationSurface: adapters.features.configurationSurface,
-        brandingMode: translation.mode
-          || (translation.status === "active" ? "version-matched-overlay" : "none"),
+        brandingMode: translation.status === "active" ? (translation.mode || "file-branding") : "none",
         mainPackage: buildMainState(main),
         translationStatus: translation.status,
         translationMessage: translation.message || null,
-        overlay: overlayState(translation),
+        branding: brandingState(translation),
         activatedAt: previousState?.activatedAt || adapters.now(),
         lastVerifiedAt: adapters.now(),
       };
       adapters.state.write(nextState);
+      // ORDER MATTERS. The intent marker is written only after the files are
+      // actually branded: writing it first would let the repair task patch a
+      // machine whose switch never finished turning on.
+      if (translation.status === "active" && !sessionMode) {
+        adapters.branding.setDesired(true, main);
+        brandingTaskResult = await adapters.brandingTask.ensure();
+        // Best-effort by design: a shortcut that cannot be rewritten must not
+        // fail a switch whose branding and monitor are both already in place.
+        try {
+          shortcutResult = await adapters.shortcuts.redirect(main);
+        } catch (shortcutError) {
+          log.warning("claude-desktop", "Claude kisayollari yonlendirilemedi; diger korumalar etkin", {
+            reason: String(shortcutError?.code || shortcutError?.message || shortcutError),
+          });
+        }
+      }
       reconcileTaskResult = sessionMode
         ? { current: true, removed: false, skipped: "transient-session" }
         : await adapters.reconcileTask.ensure();
@@ -299,12 +328,11 @@ function createClaudeDesktopBackend(overrides = {}) {
       let launched = true;
       let launchErrorCode = null;
       try {
-        if (sessionMode) await adapters.runtime.launchCiziRuntime(main.appUserModelId);
-        else await adapters.runtime.launchChat(main.appUserModelId);
+        await adapters.runtime.launchChat(main.appUserModelId);
       } catch (launchError) {
-        // A shortcut session is useful only when both gateway configuration
-        // and runtime branding were applied. Let the outer transaction restore
-        // the captured surface instead of leaving a partially started session.
+        // A shortcut session exists to start a configured Claude; if it cannot
+        // start, let the outer transaction restore the captured surface rather
+        // than leave a half-started session behind.
         if (sessionMode) throw launchError;
         launched = false;
         launchErrorCode = String(launchError?.code || "CLAUDE_DESKTOP_LAUNCH_FAILED");
@@ -320,6 +348,8 @@ function createClaudeDesktopBackend(overrides = {}) {
         launched,
         ...(launchErrorCode ? { launchErrorCode } : {}),
         automaticUpdateReconcile: sessionMode ? false : reconcileTaskResult.current !== false,
+        automaticBrandingRepair: !sessionMode && brandingTaskResult?.current === true,
+        redirectedShortcuts: shortcutResult?.redirected || 0,
         sessionMode,
         translationStatus: translation.status,
         translationMessage: translation.message || null,
@@ -333,9 +363,17 @@ function createClaudeDesktopBackend(overrides = {}) {
       try {
         await surface.restore(rollbackSurface);
         if (!sessionMode && !reconcileTaskBefore.exists) await adapters.reconcileTask.remove();
-        if (translation?.installedByOperation && (!wasActive || !previousState?.overlay)) {
-          await adapters.overlay.removeForState({ overlay: overlayState(translation) });
+        // Branding files are only put back when this operation is what patched
+        // them. If the switch was already on, the previous run owns them and
+        // restoring here would strip a working integration.
+        if (translation?.changed && !wasActive) {
+          adapters.branding.setDesired(false);
+          await adapters.branding.removeForState({ mainPackage: buildMainState(main) });
         }
+        if (!sessionMode && !brandingTaskBefore.exists && brandingTaskResult) {
+          await adapters.brandingTask.remove();
+        }
+        if (shortcutResult?.redirected) adapters.shortcuts.restore();
       } catch (failure) { rollbackError = failure; }
       if (wasActive) {
         adapters.state.write({
@@ -368,6 +406,9 @@ function createClaudeDesktopBackend(overrides = {}) {
     // "off" over a still-configured Claude Desktop.
     if (!state?.active && !baseline) {
       await adapters.reconcileTask.remove();
+      adapters.branding.setDesired(false);
+      await adapters.brandingTask.remove();
+      adapters.shortcuts.restore();
       adapters.legacy.cleanupLegacy({ baseline });
       return { ok: true, applied: false, restored: false, alreadyOff: true };
     }
@@ -377,20 +418,37 @@ function createClaudeDesktopBackend(overrides = {}) {
     if (runtime.running) throw codedError("PROCESS_RUNNING", "Claude Desktop must be closed before restoring its previous configuration.");
     const main = runtime.installed ? adapters.identity.mainPackageIdentity(runtime) : null;
     const rollbackSurface = await surface.capture();
-    let overlayRemoved = false;
+    let brandingRemoved = false;
     let reconcileTaskRemoved = false;
     try {
+      // ORDER MATTERS, and it is the reverse of turning on: the intent is
+      // cleared BEFORE anything is restored. If this process dies halfway
+      // through, the repair task reads "should be off" and finishes putting
+      // Claude's files back instead of re-patching them.
+      adapters.branding.setDesired(false);
       const taskRemoval = await adapters.reconcileTask.remove();
       reconcileTaskRemoved = !!taskRemoval?.removed;
       await surface.restoreAndVerify(baseline);
-      if (state?.overlay) {
-        const removal = await adapters.overlay.removeForState(state);
-        overlayRemoved = !!removal?.removed;
+      // Turning the switch off has to put Claude's own files back even when the
+      // record does not mention branding: the record can be lost while the
+      // patched files are still on disk. The engine decides from hashes and
+      // reports "nothing to restore" instead of failing when there is no backup.
+      if (main) {
+        const removal = await adapters.branding.removeForState({
+          ...(state || {}),
+          mainPackage: state?.mainPackage || buildMainState(main),
+        });
+        brandingRemoved = !!removal?.removed;
       }
       if (main) {
         const after = await adapters.runtime.getStatus();
         adapters.identity.assertMainPackagePreserved(main, after, "revert");
       }
+      // The monitor is removed last, once the files are genuinely back. Removing
+      // it earlier would give up the one thing that can finish this job if the
+      // restore fails halfway.
+      await adapters.brandingTask.remove();
+      adapters.shortcuts.restore();
       adapters.legacy.cleanupLegacy({ baseline });
       adapters.state.write({ schemaVersion: STATE_SCHEMA_VERSION, backend: "original-package", active: false, phase: "off" });
       adapters.state.remove();
@@ -399,7 +457,10 @@ function createClaudeDesktopBackend(overrides = {}) {
       let rollbackError = null;
       try {
         await surface.restore(rollbackSurface);
-        if (overlayRemoved && main && state?.translationStatus === "active") await adapters.overlay.ensureForMain(main);
+        if (brandingRemoved && main && state?.translationStatus === "active") {
+          await adapters.branding.ensureForMain(main);
+          adapters.branding.setDesired(true, main);
+        }
         if (reconcileTaskRemoved && !state?.sessionMode) await adapters.reconcileTask.ensure();
       } catch (failure) { rollbackError = failure; }
       // A record that could not be read must not be rebuilt from guesses; the
@@ -449,27 +510,27 @@ function createClaudeDesktopBackend(overrides = {}) {
     const configured = applied && await policyConfigured(state);
     let automaticUpdateReconcile = !applied || state?.sessionMode === true;
     let reconcileTaskStatusError = null;
+    let automaticBrandingRepair = !applied || state?.sessionMode === true;
     if (applied && !state?.sessionMode) {
       try { automaticUpdateReconcile = await adapters.reconcileTask.isCurrent(); }
       catch (error) { reconcileTaskStatusError = error; automaticUpdateReconcile = false; }
+      try { automaticBrandingRepair = await adapters.brandingTask.isCurrent(); }
+      catch { automaticBrandingRepair = false; }
     }
     let translationStatus = applied ? (state?.translationStatus || "pending") : "inactive";
-    let overlayInstalled = false;
-    let overlayStatusError = null;
-    if (state?.brandingMode === "version-matched-overlay" || !applied) {
+    let brandingApplied = false;
+    let brandingStatusError = null;
+    // Whether the labels are actually there is read from the files themselves,
+    // never from the record. That is what makes a Claude update show up as
+    // "needs refresh" instead of a switch that still claims to be fine.
+    if (applied && runtime.installed && state?.brandingMode === "file-branding") {
       try {
-        const currentOverlay = await adapters.overlay.queryInstalledOverlay();
-        overlayInstalled = !!currentOverlay;
-        if (applied && state?.translationStatus === "active") {
-          const matches = currentOverlay
-            && currentOverlay.packageFullName === state.overlay?.packageFullName
-            && currentOverlay.publisher === state.overlay?.publisher
-            && currentOverlay.version === runtime.Version;
-          if (!matches) translationStatus = "error";
-        }
+        const inspection = await adapters.branding.inspect(adapters.identity.mainPackageIdentity(runtime));
+        brandingApplied = !!inspection.allPatched;
+        if (state?.translationStatus === "active" && !inspection.allPatched) translationStatus = "error";
       } catch (error) {
-        overlayStatusError = error;
-        if (applied) translationStatus = "error";
+        brandingStatusError = error;
+        translationStatus = "error";
       }
     }
     const packageChanged = !!(applied && runtime.installed && state?.mainPackage
@@ -478,6 +539,7 @@ function createClaudeDesktopBackend(overrides = {}) {
     const needsRefresh = !!(applied && runtime.installed
       && (!configured
         || (!state?.sessionMode && !automaticUpdateReconcile)
+        || (!state?.sessionMode && !automaticBrandingRepair)
         || packageChanged
         || translationStatus === "error"
         || unreadable
@@ -500,14 +562,15 @@ function createClaudeDesktopBackend(overrides = {}) {
       hasBackup: adapters.state.hasBaseline(),
       needsRefresh,
       automaticUpdateReconcile,
+      automaticBrandingRepair,
+      shortcutRedirect: applied ? adapters.shortcuts.getStatus() : { managed: 0, redirected: 0, unredirected: 0 },
       backend: "original-package",
       appUserModelId: packageIdentity.CLAUDE_MAIN_APP_ID,
       translationStatus,
-      translationMessage: applied ? (state?.translationMessage || (translationStatus === "error" ? "The Turkish interface package needs repair." : null)) : null,
-      brandingStatus: applied
-        && ["version-matched-overlay", "runtime-devtools"].includes(state?.brandingMode)
+      translationMessage: applied ? (state?.translationMessage || (translationStatus === "error" ? "The Turkish interface labels need repair." : null)) : null,
+      brandingStatus: applied && state?.brandingMode === "file-branding" && translationStatus !== "error"
         ? "active" : "inactive",
-      overlayInstalled,
+      brandingApplied,
       phase: unreadable || (applied && !state) ? "repair-required" : (state?.phase || (applied ? "on" : "off")),
       detectionState,
       processState,
@@ -515,7 +578,7 @@ function createClaudeDesktopBackend(overrides = {}) {
         : processState === "unknown" ? "PROCESS_SCAN_FAILED"
           : unreadable ? "CLAUDE_STATE_UNREADABLE"
           : reconcileTaskStatusError ? String(reconcileTaskStatusError.code || "CLAUDE_RECONCILE_TASK_STATUS_FAILED")
-          : overlayStatusError ? "CLAUDE_OVERLAY_STATUS_FAILED" : null,
+          : brandingStatusError ? "CLAUDE_BRANDING_STATUS_FAILED" : null,
       blocked,
       blockReason: block.blocked ? "Machine policy"
         : detectionState === "unknown" ? "Cizi Code could not verify Claude Desktop. Try again."
@@ -531,11 +594,16 @@ function createClaudeDesktopBackend(overrides = {}) {
     if (!state?.active) {
       await adapters.policy.cleanupOwnedOrphans(state?.baseUrl);
       await adapters.reconcileTask.remove();
+      adapters.branding.setDesired(false);
+      await adapters.brandingTask.remove();
+      adapters.shortcuts.restore();
       const runtime = await adapters.runtime.getStatus();
-      if (runtime.installed && !runtime.running && runtime.processScanOk !== false
-          && typeof adapters.overlay.removeOwnedOrphanForMain === "function") {
+      // The switch is off, so Claude's own files must not stay patched. This is
+      // what repairs a machine where an OFF was interrupted before the files
+      // were put back.
+      if (runtime.installed && !runtime.running && runtime.processScanOk !== false) {
         const main = adapters.identity.mainPackageIdentity(runtime);
-        await adapters.overlay.removeOwnedOrphanForMain(main);
+        await adapters.branding.removeOwnedOrphanForMain(main);
       }
       const cleaned = adapters.legacy.cleanupLegacy({ baseline });
       return { reconciled: false, reason: "inactive", legacyCleanup: cleaned };
@@ -551,14 +619,7 @@ function createClaudeDesktopBackend(overrides = {}) {
     let reconcileTaskResult = null;
     try {
       const values = { base: state.baseUrl };
-      const { translation } = await configure(
-        values,
-        state.models || [],
-        main,
-        onProgress,
-        state,
-        { runtimeBranding: state.sessionMode === true || state.brandingMode === "runtime-devtools" },
-      );
+      const { translation } = await configure(values, state.models || [], main, onProgress, state);
       const after = await adapters.runtime.getStatus();
       adapters.identity.assertMainPackagePreserved(main, after, "reconcile");
       const nextState = {
@@ -570,21 +631,32 @@ function createClaudeDesktopBackend(overrides = {}) {
         mainPackage: buildMainState(main),
         translationStatus: translation.status,
         translationMessage: translation.message || null,
-        brandingMode: translation.mode
-          || (translation.status === "active" ? "version-matched-overlay" : "none"),
-        overlay: overlayState(translation),
+        brandingMode: translation.status === "active" ? (translation.mode || "file-branding") : "none",
+        branding: brandingState(translation),
         lastVerifiedAt: adapters.now(),
         lastErrorCode: undefined,
         rollbackErrorCode: undefined,
       };
       adapters.state.write(nextState);
       reconcileTaskResult = await adapters.reconcileTask.ensure();
+      let brandingTaskResult = null;
+      if (translation.status === "active") {
+        adapters.branding.setDesired(true, main);
+        brandingTaskResult = await adapters.brandingTask.ensure();
+        // Catches a shortcut the user created after the switch was turned on.
+        // Our launcher shortcut itself needs no update across Claude versions -
+        // it points at Cizi Code, not at a build - so an already redirected
+        // shortcut is left alone and never backed up a second time.
+        try { await adapters.shortcuts.redirect(main); }
+        catch { /* ikincil koruyucu; onarimi bloklamaz */ }
+      }
       adapters.legacy.cleanupLegacy({ baseline });
       return {
         reconciled: true,
         version: main.version,
         translationStatus: translation.status,
         automaticUpdateReconcile: reconcileTaskResult.current !== false,
+        automaticBrandingRepair: brandingTaskResult?.current === true,
       };
     } catch (error) {
       let rollbackError = null;
@@ -612,17 +684,13 @@ function createClaudeDesktopBackend(overrides = {}) {
     if (!runtime.installed) throw codedError("INSTALL_REQUIRED", "Claude Desktop is not installed.");
     if (state?.active && !runtime.running) await reconcileUnlocked(onProgress);
     const latest = readStateRecord().state || state;
-    if (latest?.active && latest.brandingMode === "runtime-devtools") {
-      await adapters.runtime.launchCiziRuntime(packageIdentity.CLAUDE_MAIN_APP_ID);
-    } else if (latest?.active) await adapters.runtime.launchChat(packageIdentity.CLAUDE_MAIN_APP_ID);
+    if (latest?.active) await adapters.runtime.launchChat(packageIdentity.CLAUDE_MAIN_APP_ID);
     else await adapters.runtime.launchOriginal(packageIdentity.CLAUDE_MAIN_APP_ID);
     return {
       launched: true,
       backend: "original-package",
       appUserModelId: packageIdentity.CLAUDE_MAIN_APP_ID,
-      launchTarget: latest?.brandingMode === "runtime-devtools"
-        ? "runtime-branded-application"
-        : latest?.active ? "new-chat" : "application",
+      launchTarget: latest?.active ? "new-chat" : "application",
       translationStatus: latest?.active ? (latest.translationStatus || "pending") : "inactive",
     };
   }

@@ -29,6 +29,9 @@
       "src/**/*",
       "assets/**/*"
     ],
+    "asarUnpack": [
+      "src/main/tools/claudeBranding/**/*"
+    ],
     "directories": {
       "output": "dist"
     },

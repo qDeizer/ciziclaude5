@@ -1,10 +1,10 @@
 // Ownership boundary for Anthropic's main Claude Desktop package.
 //
-// Cizi Code may configure policies and install/remove its own overlay package,
-// but it never owns, removes, unregisters, or replaces the main Claude MSIX.
-// Keep this module dependency-free so lifecycle code and tests share the same
-// definition of the package that must survive Connect, Disconnect, and Cizi
-// uninstallation.
+// Cizi Code may configure policies and patch the interface labels inside the
+// installed package, but it never owns, removes, unregisters, or replaces the
+// main Claude MSIX. Keep this module dependency-free so lifecycle code and tests
+// share the same definition of the package that must survive Connect,
+// Disconnect, and Cizi uninstallation.
 
 const CLAUDE_MAIN_PACKAGE_NAME = "Claude";
 const CLAUDE_MAIN_PACKAGE_FAMILY = "Claude_pzs8sxrjxfjjc";
@@ -77,32 +77,6 @@ function isMainClaudePackage(candidate) {
     || new RegExp(`^${CLAUDE_MAIN_PACKAGE_NAME}_[^_]+_[^_]+__pzs8sxrjxfjjc$`, "i").test(fullName);
 }
 
-function assertOverlayRemovalAllowed(candidate) {
-  if (!candidate || typeof candidate !== "object" || isMainClaudePackage(candidate)) {
-    const error = new Error("Cizi Code will not remove the main Claude Desktop package.");
-    error.code = "CLAUDE_MAIN_PACKAGE_REMOVAL_BLOCKED";
-    throw error;
-  }
-  const packageFullName = safeString(candidate.packageFullName || candidate.PackageFullName);
-  if (!packageFullName) {
-    const error = new Error("The Cizi overlay package identity is missing.");
-    error.code = "CLAUDE_OVERLAY_PACKAGE_IDENTITY_INVALID";
-    throw error;
-  }
-  return packageFullName;
-}
-
-async function removeOverlayPackage(candidate, removePackageFn) {
-  const packageFullName = assertOverlayRemovalAllowed(candidate);
-  if (typeof removePackageFn !== "function") {
-    const error = new Error("The Cizi overlay removal adapter is unavailable.");
-    error.code = "CLAUDE_OVERLAY_REMOVAL_UNAVAILABLE";
-    throw error;
-  }
-  await removePackageFn(packageFullName);
-  return { removed: true, packageFullName };
-}
-
 module.exports = {
   CLAUDE_MAIN_PACKAGE_NAME,
   CLAUDE_MAIN_PACKAGE_FAMILY,
@@ -111,6 +85,4 @@ module.exports = {
   sameMainPackage,
   assertMainPackagePreserved,
   isMainClaudePackage,
-  assertOverlayRemovalAllowed,
-  removeOverlayPackage,
 };

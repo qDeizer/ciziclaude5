@@ -13,6 +13,11 @@ const { createCodexCliService } = require("./codexCli");
 const { createCodexDesktopService } = require("./codexDesktop");
 const codexConfig = require("./codexConfigFile");
 const claudeDesktopBackend = require("./tools/claudeDesktop");
+const claudeDesktopBranding = require("./tools/claudeDesktopBranding");
+const claudePackageIdentity = require("./tools/claudePackageIdentity");
+const claudeShortcuts = require("./tools/claudeShortcuts");
+const brandingRepairTask = require("./tools/claudeBrandingTask");
+const claudeLaunchGuard = require("./claudeLaunchGuard");
 const claudeLifecycle = require("./tools/claudeLifecycle");
 const reconcileBackgroundTask = require("./tools/claudeReconcileTask");
 const toolIntentStore = require("./tools/toolIntentStore");
@@ -26,6 +31,22 @@ const CLAUDE_CODE_OFFICIAL_URL = "https://code.claude.com/docs/en/getting-starte
 const CLAUDE_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const RECONCILE_INTERVAL_MS = Number(process.env.CIZI_RECONCILE_INTERVAL_MS) || 5 * 60 * 1000;
 const HEADLESS_RECONCILE = process.argv.includes("--cizi-reconcile-active-tools");
+
+// A redirected Claude shortcut starts Cizi Code with this flag. It is handled
+// BEFORE the single-instance lock on purpose: the shortcut has to work while
+// Cizi Code is already running, and a contender that asks for the lock would
+// simply exit without ever launching Claude. This path only reads state, so it
+// is safe to run alongside the main instance.
+if (process.argv.includes(claudeShortcuts.LAUNCH_FLAG)) {
+  app.whenReady().then(() => claudeLaunchGuard.run({
+    brandingTaskName: brandingRepairTask.TASK_NAME,
+    branding: claudeDesktopBranding,
+    lifecycle: claudeLifecycle,
+    packageIdentity: claudePackageIdentity,
+    runPowerShellFn: claudeLifecycle.runPowerShell,
+  })).finally(() => app.exit(0));
+  return;
+}
 
 // The CLI launcher can be invoked repeatedly while the desktop process is
 // already starting. Keep one desktop process (and therefore one installer

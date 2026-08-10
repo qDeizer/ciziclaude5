@@ -2,7 +2,9 @@
 // construction free of Electron, registry and filesystem access makes the
 // ON/OFF orchestrator smaller and lets tests prove exactly what Cizi owns.
 
-const STATE_SCHEMA_VERSION = 4;
+// 5: the MSIX overlay package was replaced by in-place file branding, so the
+// record now stores which files were patched instead of an overlay identity.
+const STATE_SCHEMA_VERSION = 5;
 const DIRECT_GATEWAY_MODE = "direct-gateway";
 const CONFIG_LIBRARY_SURFACE = "config-library";
 const CONFIG_KEYS = Object.freeze([
@@ -113,16 +115,19 @@ function buildMainState(main) {
   };
 }
 
-function overlayState(result) {
-  if (!result?.package) return null;
+// What the switch has to remember about branding: which Claude build was
+// patched and how many files it touched. Nothing here is used to decide whether
+// the patch is still in place - that decision is always made by hashing the
+// files on disk, so a stale record can never make the switch report success over
+// an updated Claude.
+function brandingState(result) {
+  if (!result || result.status !== "active" || !result.package) return null;
   return {
-    identityName: result.package.name,
+    mode: result.mode || "file-branding",
     packageFullName: result.package.packageFullName,
-    packageFamilyName: result.package.packageFamilyName,
-    publisher: result.package.publisher,
     version: result.package.version,
-    signerThumbprint: result.artifact?.signerThumbprint || null,
-    patchSetVersion: result.artifact?.patchSetVersion || null,
+    installKind: result.package.installKind || "msix",
+    files: Number(result.files) || 0,
   };
 }
 
@@ -141,5 +146,5 @@ module.exports = {
   normalizedGateway,
   validCiziModels,
   buildMainState,
-  overlayState,
+  brandingState,
 };
