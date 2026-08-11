@@ -81,58 +81,6 @@ function exists(target) {
   }
 }
 
-function entry(pathName, reason) {
-  return { path: pathName, reason, exists: exists(pathName) };
-}
-
-// Which paths a removal may touch, given whether the OTHER product stays.
-// `sharedRemovable` is the single rule the UI and the CLI both surface: shared
-// Codex data is only cleared when nothing else on this machine uses it.
-function planRemoval({ target, otherInstalled }) {
-  const desktop = desktopPaths();
-  const cli = cliPaths();
-  const shared = sharedPaths();
-  const keepShared = otherInstalled !== false;
-
-  const remove = [];
-  const preserve = [];
-
-  if (target === "desktop") {
-    remove.push(entry(desktop.packageStateDir, "ChatGPT Desktop uygulama verisi"));
-    remove.push(entry(desktop.runtimeDir, "ChatGPT Desktop yerel çalışma dosyaları"));
-    if (keepShared) {
-      preserve.push(entry(cli.programDir, "Codex CLI kurulumu bu bilgisayarda duruyor"));
-      preserve.push(entry(cli.standaloneDir, "Codex CLI paket dosyaları"));
-      preserve.push(entry(shared.root, "Codex CLI hâlâ bu klasörü kullanıyor"));
-    } else {
-      remove.push(entry(shared.root, "Başka Codex ürünü kalmadı"));
-    }
-  } else if (target === "cli") {
-    remove.push(entry(cli.programDir, "Codex CLI kurulumu"));
-    remove.push(entry(cli.standaloneDir, "Codex CLI paket dosyaları"));
-    remove.push(entry(cli.legacyProfile, "Eski Cizi Code CLI profili"));
-    if (keepShared) {
-      preserve.push(entry(desktop.packageStateDir, "ChatGPT Desktop bu bilgisayarda duruyor"));
-      preserve.push(entry(desktop.runtimeDir, "ChatGPT Desktop yerel çalışma dosyaları"));
-      preserve.push(entry(shared.root, "ChatGPT Desktop hâlâ bu klasörü kullanıyor"));
-    } else {
-      remove.push(entry(shared.root, "Başka Codex ürünü kalmadı"));
-    }
-  } else {
-    throw new Error(`Unknown removal target '${target}'.`);
-  }
-
-  return {
-    target,
-    otherInstalled: keepShared,
-    sharedRemovable: !keepShared,
-    sharedRoot: shared.root,
-    remove: remove.filter((item) => item.exists),
-    plannedButMissing: remove.filter((item) => !item.exists).map((item) => item.path),
-    preserve: preserve.filter((item) => item.exists),
-  };
-}
-
 module.exports = {
   DESKTOP_PACKAGE_NAME,
   DESKTOP_FAMILY_NAME,
@@ -145,6 +93,5 @@ module.exports = {
   sharedPaths,
   desktopPaths,
   cliPaths,
-  planRemoval,
   exists,
 };

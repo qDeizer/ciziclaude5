@@ -69,6 +69,9 @@ const DESKTOP_MESSAGES = {
   // The switch asks before closing a running Claude Desktop rather than
   // refusing outright, so this is a question the UI turns into a prompt.
   PROCESS_RUNNING_CONFIRMATION_REQUIRED: "Claude Desktop açık; devam etmek için kapatma onayı gerekiyor.",
+  ELEVATION_CANCELLED: "Windows yönetici onayı verilmedi; Claude Desktop ayarları değiştirilmedi.",
+  ELEVATION_TIMEOUT: "Windows yönetici işlemi zaman aşımına uğradı. Tekrar deneyin.",
+  ELEVATION_RESULT_MISSING: "Windows yönetici işleminin sonucu okunamadı. Claude Desktop ayarları değiştirilmedi.",
 };
 
 function desktopMessage(error) {
@@ -81,7 +84,6 @@ function createClaudeCoordinator({
   lifecycle,
   toolManager,
   detectCli,
-  installCli,
   log,
   onDesktopProgress,
 } = {}) {
@@ -100,180 +102,100 @@ function createClaudeCoordinator({
     try { return fn(); } catch { return fallback; }
   }
 
-  // Combined view of both products plus whether each is currently connected.
+  // What the screen needs about both Claude products. They no longer form one
+  // transaction - each has its own switch - but the screen still shows them
+  // together, so one call answers for both.
   async function getState(base) {
     const [cli, desktop] = await Promise.all([
       safe(() => detectCli(), { installed: false, command: null, version: null }),
       safe(() => claudeDesktop.getStatus(base), { installed: false, applied: false, blocked: false, errorCode: "CLAUDE_DESKTOP_STATUS_FAILED" }),
     ]);
     const cliStatus = trySync(() => toolManager.getToolStatus(CLAUDE_CODE_TOOL_ID, base), null);
-    const cliApplied = cliStatus?.applied === true;
-    // A snapshot on disk means the CLI's original settings.json is still parked
-    // somewhere else, whether or not the file currently looks configured. The
-    // switch has to be able to put it back either way.
-    const cliHasBackup = cliStatus?.hasBackup === true;
-    // "Connected" means every product that is actually installed is connected.
-    // With nothing installed there is nothing to connect.
-    const installed = [];
-    if (cli.installed) installed.push("cli");
-    if (desktop.installed) installed.push("desktop");
-    const connected = installed.length > 0
-      && (!cli.installed || cliApplied)
-      && (!desktop.installed || desktop.applied === true);
     return {
-      cli: { ...cli, applied: cliApplied, hasBackup: cliHasBackup },
+      // A snapshot on disk means the CLI's original settings.json is still parked
+      // somewhere else, whether or not the file currently looks configured. The
+      // switch has to be able to put it back either way.
+      cli: {
+        ...cli,
+        applied: cliStatus?.applied === true,
+        restorable: cliStatus?.restorable === true,
+      },
       desktop,
-      installedProducts: installed,
-      connected,
-      partial: installed.length > 0 && !connected && (cliApplied || desktop.applied === true),
-      canConnect: installed.length > 0 && !desktop.blocked,
-      blockReason: desktop.blocked ? (desktop.blockReason || "Claude Desktop şu an denetlenemiyor.") : null,
     };
   }
 
-  // Connects both products as one unit. The CLI goes first because it is the
-  // cheap, reversible half; if the desktop transaction then fails, the CLI is
-  // reverted so the switch never reports a half-connected state.
-  //
-  // `closeRunning` is the user's explicit answer to "may I close Claude
-  // Desktop?". Claude Desktop reads its managed configuration once at startup,
-  // so it has to be closed before the switch can change anything — and it
-  // launches itself right after being installed, which is exactly when the user
-  // first reaches for the switch. Rather than refusing with "close it first",
-  // the switch asks and then does it.
-  async function connect(values, { closeRunning = false } = {}) {
-    const state = await getState(values?.base);
-    if (!state.installedProducts.length) {
-      throw codedError("CLAUDE_NOT_INSTALLED", "Önce Claude Code CLI veya Claude Desktop kurun.");
+  // Claude Desktop reads its managed configuration once at startup, so it has to
+  // be closed before the switch may change anything - and it opens itself right
+  // after being installed, which is exactly when the switch is first used. Rather
+  // than refusing with "close it first", the switch asks and then does it.
+  function requireClosed(status, closeRunning, purpose) {
+    if (!status.installed || !status.running) return false;
+    if (!closeRunning) {
+      throw codedError(
+        "PROCESS_RUNNING_CONFIRMATION_REQUIRED",
+        purpose === "apply"
+          ? "Claude Desktop şu an açık. Ayarların uygulanabilmesi için kapatılması gerekiyor."
+          : "Claude Desktop şu an açık. Önceki ayarlarınızın geri yüklenebilmesi için kapatılması gerekiyor.",
+      );
     }
-    if (state.desktop.blocked && state.desktop.installed) {
-      throw codedError("CLAUDE_DESKTOP_BLOCKED", state.blockReason || "Claude Desktop şu an ayarlanamıyor.");
-    }
-    if (!values?.model) throw codedError("MODEL_REQUIRED", "Bu araç için uygun bir hesap modeli bulunamadı.");
-
-    if (state.desktop.installed && state.desktop.running) {
-      if (!closeRunning) {
-        throw codedError(
-          "PROCESS_RUNNING_CONFIRMATION_REQUIRED",
-          "Claude Desktop şu an açık. Ayarların uygulanabilmesi için kapatılması gerekiyor.",
-        );
-      }
-      report("stopping", "Claude Desktop kapatılıyor...");
-      await stopDesktop();
-      log?.info("claude", "Claude Desktop kullanıcı onayıyla kapatıldı");
-    }
-
-    let cliApplied = false;
-    if (state.cli.installed) {
-      report("configuring", "Claude Code CLI ayarlanıyor...");
-      toolManager.applyTool(CLAUDE_CODE_TOOL_ID, values);
-      cliApplied = true;
-      log?.info("claude", "Claude Code CLI bağlandı", { defaultModel: values.model, modelCount: values.models?.length || 1 });
-    }
-
-    let desktopResult = null;
-    if (state.desktop.installed) {
-      try {
-        desktopResult = await claudeDesktop.apply(values, (phase, message, details) => report(phase, message, details));
-        // Connecting configures Claude Desktop without opening it; the app is
-        // started only from the shortcut/launch action.
-        log?.info("claude", "Claude Desktop bağlandı", {
-          defaultModel: values.model,
-          modelCount: values.models?.length || 1,
-          branding: desktopResult?.brandingStatus || null,
-        });
-      } catch (error) {
-        // Undo the CLI half so the two never disagree about being connected.
-        if (cliApplied) {
-          try {
-            const rollback = toolManager.revertTool(CLAUDE_CODE_TOOL_ID, values.base);
-            const rollbackStatus = toolManager.getToolStatus(CLAUDE_CODE_TOOL_ID, values.base);
-            if (rollback?.applied === true || rollbackStatus?.applied === true) {
-              error.rollbackError = codedError(
-                "CLAUDE_CLI_ROLLBACK_VERIFY_FAILED",
-                "Claude Code CLI settings could not be restored after Claude Desktop failed.",
-              );
-              log?.error("claude", "Claude Desktop bağlantısı başarısız oldu ve Claude Code CLI geri alma işlemi doğrulanamadı", {
-                rollback: "failed",
-                stillApplied: true,
-              });
-            } else {
-              log?.success?.("claude", "Claude Code CLI geri alma işlemi doğrulandı", { rollback: "verified" });
-            }
-            log?.info("claude", "Claude Desktop bağlanamadığı için Claude Code CLI ayarı geri alındı");
-          } catch (revertError) {
-            error.rollbackError = revertError;
-            log?.error("claude", `Claude Code CLI geri alınamadı: ${revertError?.message || revertError}`);
-          }
-        }
-        log?.error("claude", `Claude Desktop bağlanamadı: ${error?.code || ""} ${error?.message || error}`);
-        throw Object.assign(error, { userMessage: desktopMessage(error) });
-      }
-    }
-
-    report("", "");
-    return {
-      ok: true,
-      connectedProducts: [...(cliApplied ? ["cli"] : []), ...(desktopResult ? ["desktop"] : [])],
-      skipped: state.installedProducts.filter((id) => (id === "cli" ? !cliApplied : !desktopResult)),
-      desktop: desktopResult,
-    };
+    return true;
   }
 
-  // Disconnects both. The desktop half runs first because it is the one that
-  // can refuse (a running app, a missing baseline); the CLI half is then always
-  // reverted, so a desktop failure cannot strand the CLI in a connected state.
-  async function disconnect(base, { closeRunning = false } = {}) {
-    const state = await getState(base);
-    let desktopResult = null;
-    let desktopError = null;
+  // Connects Claude Desktop alone. The Claude Code CLI is a separate switch with
+  // its own configuration file, so nothing here can strand it.
+  async function applyDesktop(values, { closeRunning = false } = {}) {
+    const status = await claudeDesktop.getStatus(values?.base);
+    if (!status.installed) throw codedError("CLAUDE_DESKTOP_NOT_INSTALLED", "Claude Desktop bu bilgisayarda kurulu değil.");
+    if (status.blocked) {
+      throw codedError("CLAUDE_DESKTOP_BLOCKED", status.blockReason || "Claude Desktop şu an ayarlanamıyor.");
+    }
+    if (!values?.model) throw codedError("MODEL_REQUIRED", "Claude Desktop için uygun bir hesap modeli bulunamadı.");
 
-    // Restoring the original configuration has the same constraint as applying
-    // one: Claude Desktop must not be reading it at the time.
-    if ((state.desktop.applied === true || state.desktop.hasBackup) && state.desktop.running) {
-      if (!closeRunning) {
-        throw codedError(
-          "PROCESS_RUNNING_CONFIRMATION_REQUIRED",
-          "Claude Desktop şu an açık. Önceki ayarlarınızın geri yüklenebilmesi için kapatılması gerekiyor.",
-        );
-      }
+    if (requireClosed(status, closeRunning, "apply")) {
       report("stopping", "Claude Desktop kapatılıyor...");
       await stopDesktop();
-      log?.info("claude", "Claude Desktop kullanıcı onayıyla kapatıldı");
     }
-
-    if (state.desktop.applied === true || state.desktop.hasBackup) {
-      try {
-        report("restoring", "Claude Desktop önceki ayarlarına döndürülüyor...");
-        desktopResult = await claudeDesktop.revert();
-        log?.info("claude", "Claude Desktop ayarları geri alındı", { restored: desktopResult?.restored === true });
-      } catch (error) {
-        desktopError = error;
-        log?.error("claude", `Claude Desktop geri alınamadı: ${error?.code || ""} ${error?.message || error}`);
-      }
-    }
-
-    let cliResult = null;
-    // Mirrors the desktop half: a stored backup is reason enough to revert, so
-    // a hand-edited or deleted settings.json cannot strand the snapshot and
-    // leave the CLI half looking permanently off while its backup lives on.
-    if (state.cli.applied || state.cli.hasBackup) {
-      cliResult = toolManager.revertTool(CLAUDE_CODE_TOOL_ID, base);
-      log?.info("claude", "Claude Code CLI ayarları geri alındı", {
-        restored: cliResult?.restored === true,
-        fromBackupOnly: !state.cli.applied,
+    try {
+      const result = await claudeDesktop.apply(values, (phase, message, details) => report(phase, message, details));
+      log?.info("claude-desktop", "Claude Desktop bağlandı", {
+        defaultModel: values.model,
+        modelCount: values.models?.length || 1,
+        branding: result?.brandingStatus || null,
       });
+      report("", "");
+      return result;
+    } catch (error) {
+      log?.error("claude-desktop", `Claude Desktop bağlanamadı: ${error?.code || ""} ${error?.message || error}`);
+      report("", "");
+      throw Object.assign(error, { userMessage: desktopMessage(error) });
     }
-
-    report("", "");
-    if (desktopError) {
-      throw Object.assign(desktopError, {
-        userMessage: desktopMessage(desktopError),
-        partial: { cliReverted: !!cliResult },
-      });
-    }
-    return { ok: true, desktop: desktopResult, cli: cliResult };
   }
+
+  // Restores Claude Desktop's own original settings. A stored baseline is reason
+  // enough to run: the record can be lost while the configuration it describes is
+  // still applied.
+  async function revertDesktop({ closeRunning = false } = {}) {
+    const status = await claudeDesktop.getStatus();
+    if (status.applied !== true && status.restorable !== true) {
+      return { ok: true, applied: false, restored: false, alreadyOff: true };
+    }
+    if (requireClosed(status, closeRunning, "revert")) {
+      report("stopping", "Claude Desktop kapatılıyor...");
+      await stopDesktop();
+    }
+    try {
+      report("restoring", "Claude Desktop önceki ayarlarına döndürülüyor...");
+      const result = await claudeDesktop.revert();
+      log?.success("claude-desktop", "Claude Desktop ayarları geri alındı", { restored: result?.restored === true });
+      report("", "");
+      return result;
+    } catch (error) {
+      log?.error("claude-desktop", `Claude Desktop geri alınamadı: ${error?.code || ""} ${error?.message || error}`);
+      report("", "");
+      throw Object.assign(error, { userMessage: desktopMessage(error) });
+    }
+  }
+
 
   // The package now downloads to a stable path so a retry can reuse it, which
   // means two installations must never run at once and fight over that file.
@@ -288,7 +210,7 @@ function createClaudeCoordinator({
   async function runDesktopInstall() {
     report("starting", "Claude Desktop kurulumu başlatılıyor...");
     try {
-      const result = await lifecycle.installTool("claude-desktop", (phase, message, details) => report(phase, message, details));
+      const result = await lifecycle.installClaudeDesktop((phase, message, details) => report(phase, message, details));
       log?.info("claude", "Claude Desktop kuruldu", { version: result?.Version || result?.version || null });
       report("complete", "Claude Desktop kuruldu.");
       return result;
@@ -305,9 +227,19 @@ function createClaudeCoordinator({
     }
   }
 
-  async function installCliTool() {
-    if (typeof installCli !== "function") throw codedError("NOT_SUPPORTED", "Claude Code CLI kurulumu bu sürümde yok.");
-    return installCli();
+  // "Sadece indir": paket doğrulanır, indirilenler klasörüne konur, kurulmaz.
+  async function downloadDesktopOnly() {
+    try {
+      const result = await lifecycle.downloadClaudeDesktopForManualInstall(
+        (phase, message, details) => report(phase, message, details),
+      );
+      log?.info("claude", "Claude Desktop paketi manuel kurulum için indirildi", { bytes: result?.bytes || null });
+      return result;
+    } catch (error) {
+      const message = desktopMessage(error);
+      report("error", message);
+      throw Object.assign(error, { userMessage: message });
+    }
   }
 
   // Re-applies the configuration after a Claude Desktop update replaced it.
@@ -342,9 +274,18 @@ function createClaudeCoordinator({
     return result;
   }
 
-  // What removing Claude Desktop would delete, so the user sees it first.
-  async function planDesktopUninstall() {
-    return lifecycle.planClaudeDesktopUninstall();
+  // The part of a removal that is not a file: registry keys, autostart entries
+  // and shortcuts. Offered as its own removal category, so it runs only when the
+  // user asked for it.
+  async function removeDesktopResidue() {
+    try {
+      const result = await lifecycle.removeClaudeDesktopResidue();
+      log?.info("claude", "Claude Desktop kayıt defteri ve kısayol kalıntıları temizlendi");
+      return result;
+    } catch (error) {
+      log?.warning("claude", `Claude Desktop kalıntı temizliği tamamlanamadı: ${error?.message || error}`);
+      return { removed: false, error: String(error?.message || error).slice(0, 300) };
+    }
   }
 
   // Removes Claude Desktop itself. The user's original Claude configuration is
@@ -353,7 +294,7 @@ function createClaudeCoordinator({
   // outlives its application is a backup nothing can ever put back.
   async function uninstallDesktop({ removeLeftovers = true } = {}) {
     const state = await getState();
-    if (state.desktop.applied === true || state.desktop.hasBackup) {
+    if (state.desktop.applied === true || state.desktop.restorable === true) {
       report("restoring", "Kaldırmadan önce orijinal Claude ayarlarınız geri yükleniyor...");
       try {
         await claudeDesktop.revert();
@@ -385,12 +326,14 @@ function createClaudeCoordinator({
 
   return {
     getState,
-    connect,
-    disconnect,
+    // Claude Desktop alone, without paying for the CLI probe that getState runs.
+    desktopStatus: (base) => claudeDesktop.getStatus(base),
+    applyDesktop,
+    revertDesktop,
     installDesktop,
-    planDesktopUninstall,
+    downloadDesktopOnly,
     uninstallDesktop,
-    installCli: installCliTool,
+    removeDesktopResidue,
     repairDesktop,
     launchDesktop,
     stopDesktop,

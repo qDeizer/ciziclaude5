@@ -3,6 +3,7 @@
 const { app } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const { writeJsonAtomic } = require("./fsAtomic");
 
 function sessionFile() {
   return path.join(app.getPath("userData"), "session.json");
@@ -54,8 +55,7 @@ function decrypt(obj) {
 
 function saveSession({ apiKey }) {
   const data = { apiKey: apiKey ? encrypt(apiKey) : null, savedAt: new Date().toISOString() };
-  fs.mkdirSync(path.dirname(sessionFile()), { recursive: true });
-  fs.writeFileSync(sessionFile(), JSON.stringify(data, null, 2));
+  writeJsonAtomic(sessionFile(), data);
 }
 
 function loadSession() {

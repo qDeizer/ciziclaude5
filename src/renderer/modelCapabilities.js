@@ -223,8 +223,19 @@
     return reasoningLevelsFor(toolId).includes(String(level || "").trim().toLowerCase());
   }
 
+  // EKRANDA gorunen ad. Gateway modelleri "Opus-5" gibi tireli id'ler yayinlar;
+  // tire bir okuma zorlugu, marka adi degil. Bu yuzden arayuzde bosluga cevrilir.
+  //
+  // YALNIZCA GORUNTU ICIN. Yapilandirmaya yazilan deger her zaman `capabilityFor`
+  // ile gelen gercek `name`'dir: "Opus 5" diye bir model id'si yok, onu bir
+  // config'e yazmak modeli cozulemez hale getirir.
+  function displayModelName(value) {
+    return String(modelName(value) || "").replace(/-/g, " ").replace(/\s+/g, " ").trim();
+  }
+
   const api = {
     ONE_MILLION_TOKENS,
+    displayModelName,
     CLAUDE_TIERS,
     TIERS_WITHOUT_LONG_CONTEXT,
     CLAUDE_DESKTOP_EFFORT_MODELS,

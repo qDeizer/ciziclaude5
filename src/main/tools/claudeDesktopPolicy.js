@@ -256,26 +256,6 @@ async function restorePolicySnapshot(snapshot, {
 }
 
 
-async function applyPolicyConfig(config) {
-  // Use reg.exe argument arrays. Values are data arguments, never PowerShell
-  // source, so endpoint/model text cannot become executable input.
-  // The API key never belongs in the policy key, and the retired values are
-  // ones earlier Cizi builds wrote that Claude Desktop does not recognise (or
-  // does not accept on a gateway deployment). Re-applying has to clear them,
-  // otherwise an upgraded install keeps carrying them forever.
-  for (const stale of ["inferenceGatewayApiKey", ...RETIRED_KEYS]) {
-    try {
-      await execFileAsync("reg.exe", ["delete", POLICY_KEY, "/v", stale, "/f"], { windowsHide: true, timeout: 10000 });
-    } catch { /* already absent */ }
-  }
-  for (const [name, value] of Object.entries(config)) {
-    await execFileAsync("reg.exe", ["add", POLICY_KEY, "/v", name, "/t", "REG_SZ", "/d", String(value), "/f"], {
-      windowsHide: true,
-      timeout: 10000,
-    });
-  }
-}
-
 async function deleteRegistryValues(names, { execFileFn = execFileAsync } = {}) {
   for (const name of [...new Set(names)]) {
     try {
@@ -346,21 +326,10 @@ async function cleanupOwnedPolicyOrphans(expectedBase, {
   return { cleaned: true, removed: [...remove].sort() };
 }
 
-async function verifyPolicyConfig(config, { capturePolicySnapshotFn = capturePolicySnapshot } = {}) {
-  const current = await capturePolicySnapshotFn();
-  for (const [name, expected] of Object.entries(config)) {
-    const value = current.values?.[name];
-    if (!value?.existed || value.type !== "REG_SZ" || value.data !== String(expected)) return false;
-  }
-  return current.values?.inferenceGatewayApiKey?.existed !== true;
-}
-
 module.exports = {
   machinePolicyBlock,
   capturePolicySnapshot,
   restorePolicySnapshot,
   policySnapshotsEqual,
-  applyPolicyConfig,
   cleanupOwnedPolicyOrphans,
-  verifyPolicyConfig,
 };

@@ -47,9 +47,10 @@
   function labelFor(element) {
     const explicit = element.getAttribute("aria-label") || element.getAttribute("title") || element.dataset.cliLabel;
     if (explicit) return normalize(explicit);
-    const row = element.closest(".tool-row");
-    const rowName = row?.querySelector(".tool-name")?.textContent;
-    if (rowName) return normalize(rowName);
+    // Bir kartın içindeki adsız denetim, kartın adıyla anlatılır.
+    const card = element.closest(".card, .product");
+    const cardName = card?.querySelector(".card-title h3, .product-name")?.textContent;
+    if (cardName) return normalize(cardName);
     const label = element.id ? document.querySelector(`label[for="${CSS.escape(element.id)}"]`) : null;
     if (label) return normalize(label.textContent);
     if (element.tagName === "SELECT") return normalize(element.previousElementSibling?.textContent || element.id);

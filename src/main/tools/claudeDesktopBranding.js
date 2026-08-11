@@ -42,6 +42,7 @@ const { createBuildService } = require("./claudeBranding/buildService");
 const { createApplyService } = require("./claudeBranding/applyService");
 const { createReconcileService } = require("./claudeBranding/reconcileService");
 const { createElevation } = require("./claudeBranding/elevation");
+const { createElevationRunner } = require("./claudeBranding/elevationRunner");
 const { createLock } = require("./claudeBranding/lock");
 const desiredState = require("./claudeBranding/desiredState");
 
@@ -153,6 +154,7 @@ function createBrandingEngine({
     generatedBy: "cizi-code-claude-branding/1",
   });
   const elevation = createElevation({ powershell });
+  const elevationRunner = createElevationRunner();
   const lock = createLock({ logger: engineLogger, workRoot, name: "claude-branding" });
   const applyService = createApplyService({
     logger: engineLogger, powershell, elevation, claudeProcess, lock, workRoot,
@@ -167,6 +169,7 @@ function createBrandingEngine({
     applyService,
     reconcileService,
     elevation,
+    elevationRunner,
     claudeProcess,
     lock,
   };
@@ -206,6 +209,11 @@ function activeResult(verification, packageInfo, changed) {
 async function ensureForMain(main, options = {}) {
   const parts = options.engine || engine();
   const packageInfo = toPackageInfo(main);
+  if ((packageInfo.installKind || "msix") !== "squirrel" && !(await parts.elevation.isElevated())) {
+    logger.info("claude-branding", "Claude dosyalari icin Windows yonetici onayi isteniyor", { operation: "apply", version: packageInfo.version });
+    const elevated = await parts.elevationRunner.run("ensure", main, parts.workRoot);
+    return activeResult({ files: Array.from({ length: elevated.files || 0 }) }, packageInfo, elevated.changed);
+  }
   let outcome;
   try {
     outcome = await parts.reconcileService.ensurePatched(packageInfo, parts.dictionary, { confirm: true });
@@ -247,7 +255,13 @@ async function removeForState(state, options = {}) {
   if (!main?.installLocation || !main?.version) {
     return { removed: false, reason: "NO_PACKAGE_RECORD" };
   }
-  const result = await parts.applyService.restore(toPackageInfo(main), { confirm: true });
+  const packageInfo = toPackageInfo(main);
+  if ((packageInfo.installKind || "msix") !== "squirrel" && !(await parts.elevation.isElevated())) {
+    logger.info("claude-branding", "Claude dosyalarini geri yuklemek icin Windows yonetici onayi isteniyor", { operation: "restore", version: packageInfo.version });
+    const elevated = await parts.elevationRunner.run("restore", main, parts.workRoot);
+    return { removed: elevated.restored, reason: elevated.reason || null, files: elevated.files || [] };
+  }
+  const result = await parts.applyService.restore(packageInfo, { confirm: true });
   return { removed: !!result.restored, reason: result.reason || null, files: result.files || [] };
 }
 
@@ -288,6 +302,10 @@ async function removeOwnedOrphanForMain(main, options = {}) {
   const state = await inspect(main, { engine: parts });
   if (!state.known || !state.files.some((file) => file.state === "patched")) {
     return { removed: false, reason: "NOTHING_TO_REMOVE" };
+  }
+  if ((packageInfo.installKind || "msix") !== "squirrel" && !(await parts.elevation.isElevated())) {
+    const elevated = await parts.elevationRunner.run("restore", main, parts.workRoot);
+    return { removed: elevated.restored, reason: elevated.reason || null };
   }
   const result = await parts.applyService.restore(packageInfo, { confirm: true });
   return { removed: !!result.restored, reason: result.reason || null };

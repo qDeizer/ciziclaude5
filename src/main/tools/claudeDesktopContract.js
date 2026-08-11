@@ -31,8 +31,6 @@ const {
 } = require("../../renderer/modelCapabilities");
 
 const STATE_SCHEMA_VERSION = 7;
-const DIRECT_GATEWAY_MODE = "direct-gateway";
-const CONFIG_LIBRARY_SURFACE = "config-library";
 
 // The surfaces Cizi turns on. Anything not listed keeps Claude Desktop's own
 // default, which is the only behaviour we can promise still works.
@@ -145,22 +143,6 @@ function desktopModels(values) {
   return normalizedModels(values);
 }
 
-function buildPolicyConfig(values, models, resolvedHelperPath) {
-  if (!resolvedHelperPath) throw new Error("Claude credential-helper path is required.");
-  return {
-    inferenceProvider: "gateway",
-    inferenceGatewayBaseUrl: claudeGatewayRoot(values.base),
-    inferenceGatewayAuthScheme: "bearer",
-    inferenceCredentialKind: "helper-script",
-    inferenceCredentialHelper: resolvedHelperPath,
-    inferenceCredentialHelperTtlSec: "300",
-    inferenceModels: JSON.stringify(models.map(inferenceModel)),
-    modelDiscoveryEnabled: "false",
-    disableDeploymentModeChooser: "true",
-    ...Object.fromEntries(Object.entries(MANAGED_FEATURES).map(([key, on]) => [key, String(on)])),
-  };
-}
-
 function buildConfigLibraryConfig(values, models, resolvedHelperPath) {
   if (!resolvedHelperPath) throw new Error("Claude credential-helper path is required.");
   return {
@@ -230,8 +212,6 @@ function brandingState(result) {
 
 module.exports = {
   STATE_SCHEMA_VERSION,
-  DIRECT_GATEWAY_MODE,
-  CONFIG_LIBRARY_SURFACE,
   CONFIG_KEYS,
   CONNECTION_KEYS,
   MANAGED_FEATURES,
@@ -241,7 +221,6 @@ module.exports = {
   normalizedModels,
   desktopModels,
   inferenceModel,
-  buildPolicyConfig,
   buildConfigLibraryConfig,
   assertDirectGatewayConfig,
   normalizedGateway,

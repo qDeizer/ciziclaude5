@@ -59,19 +59,6 @@ function restoreLegacyShortcut(shortcutPath, baselineShortcut) {
   return "removed";
 }
 
-function hasLegacyArtifacts({ paths = legacyPaths(), state } = {}) {
-  assertOwnedPaths(paths);
-  return !!(
-    fs.existsSync(paths.versions)
-    || fs.existsSync(paths.current)
-    || fs.existsSync(paths.shortcut)
-    || state?.managedAppDir
-    || state?.managedExecutable
-    || state?.shortcutPath
-    || Number(state?.schemaVersion || 0) < 3
-  );
-}
-
 function cleanupLegacy({ baseline, paths = legacyPaths() } = {}) {
   assertOwnedPaths(paths);
   const result = {
@@ -95,6 +82,5 @@ module.exports = {
   legacyPaths,
   assertOwnedPaths,
   restoreLegacyShortcut,
-  hasLegacyArtifacts,
   cleanupLegacy,
 };

@@ -3,8 +3,8 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { promisify } = require("util");
-const codexPaths = require("./codexPaths");
-const codexConfig = require("./codexConfigFile");
+const { downloadForManualInstall } = require("./manualInstall");
+const { usableEditorExtensions, editorUserSettings } = require("./editorExtensions");
 
 const execFileAsync = promisify(execFile);
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -50,6 +50,50 @@ function addUnique(list, value) {
   if (!list.some((entry) => entry.key === key)) list.push({ key, command });
 }
 
+// Codex eklentisi (VS Code ve türevleri) kendi Codex CLI ikilisini taşıyor:
+// Windows için ~293 MB, WSL içinde çalıştırmak için ayrıca bir Linux ikilisi.
+// Yani eklentiyi kuran kullanıcıda Codex VARDIR ama PATH'te `codex` yoktur.
+//
+// Yapılandırma açısından ayrı bir depo YOK: eklentinin kendi kodu
+// `process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex")` çözümlemesini
+// kullanıyor ve oradan `config.toml` okuyor - yani bizim tek Codex anahtarımızın
+// yazdığı dosya. Tek istisna WSL modu, aşağıda.
+const VSCODE_EXTENSION_ID = "openai.chatgpt";
+
+// Eklentinin bir ayarı Codex'i WSL İÇİNDE çalıştırıyor
+// (`chatgpt.runCodexInWindowsSubsystemForLinux`). O modda eklenti config.toml'u
+// WSL dağıtımının kendi ev dizininden okuyor (kendi kodunda
+// `bash -lc 'printf %s "${CODEX_HOME:-$HOME/.codex}"'` ile çözüyor). Bizim
+// Windows tarafına yazdığımız dosya oraya ULAŞMAZ - yani anahtar "Bağlı" derken
+// düzenleyicinin Codex'i yapılandırılmamış olur. Bu yüzden ayar OKUNUR ve
+// kullanıcıya söylenir; sessizce yanlış bir güven verilmez.
+const WSL_SETTING_KEY = "chatgpt.runCodexInWindowsSubsystemForLinux";
+
+function vscodeCodexInstallations() {
+  return usableEditorExtensions(VSCODE_EXTENSION_ID, {
+    binaries: [
+      ["bin", "windows-x86_64", "codex.exe"],
+      ["bin", "linux-x86_64", "codex"],
+      ["bin", "darwin-arm64", "codex"],
+      ["bin", "darwin-x86_64", "codex"],
+    ],
+  }).map((item) => ({
+    ...item,
+    // Bu platformda çalıştırılabilecek ikili; Linux kopyası WSL için taşınıyor.
+    binary: item.binaries.find((candidate) => (process.platform === "win32"
+      ? /windows-x86_64/.test(candidate)
+      : !/windows-x86_64/.test(candidate))) || item.binaries[0],
+  }));
+}
+
+// Hangi düzenleyicilerde WSL modu açık. Boş dizi "hiçbirinde" demek.
+function editorsRunningCodexInWsl() {
+  if (process.platform !== "win32") return [];
+  return editorUserSettings()
+    .filter((entry) => entry.settings && entry.settings[WSL_SETTING_KEY] === true)
+    .map((entry) => entry.editor);
+}
+
 function standalonePaths() {
   const home = os.homedir();
   const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
@@ -83,6 +127,7 @@ function versionText(result) {
 
 function classifyInstallation(command, paths) {
   const candidate = path.resolve(String(command || ""));
+  if (/[\\/]extensions[\\/]openai\.chatgpt-/i.test(candidate)) return "vscode-extension";
   if (candidate.toLowerCase() === paths.programBin.toLowerCase()) return "standalone";
   if (candidate.toLowerCase().startsWith(paths.standaloneDir.toLowerCase())) return "standalone";
   if (/\\npm\\codex\.(cmd|exe)$/i.test(candidate)) return "npm";
@@ -112,6 +157,16 @@ async function detectCodexCli() {
     [path.join(paths.home, ".local", "bin", "codex"), "/usr/local/bin/codex", "/usr/bin/codex"].forEach((item) => addUnique(candidates, item));
   }
 
+  // Eklenti kurulumları ayrı raporlanır: ikilisi 293 MB, sürüm için
+  // çalıştırılmaz (klasör adında yazıyor).
+  const editorExtensions = vscodeCodexInstallations().map((item) => ({
+    editor: item.editor,
+    version: item.version,
+    active: item.active,
+    command: item.binary,
+  }));
+  const wslEditors = editorsRunningCodexInWsl();
+
   for (const candidate of candidates) {
     if (candidate.command !== "codex" && !fs.existsSync(candidate.command)) continue;
     try {
@@ -123,45 +178,30 @@ async function detectCodexCli() {
           version,
           installation: classifyInstallation(candidate.command, paths),
           profilePath: paths.profile,
+          editorExtensions,
+          wslEditors,
         };
       }
     } catch {
       // Continue past broken PATH entries and uninstalled shims.
     }
   }
-  return { installed: false, command: null, version: null, installation: null, profilePath: paths.profile };
+
+  // Düzenleyici eklentisi Codex'in kendi ikilisini taşısa da bu bağımsız
+  // kurulum sayılmaz: eklenti yalnızca BİLGİ olarak raporlanır, `installed`
+  // yalnızca gerçek Codex CLI (PATH/standalone) için true olur. Böylece ekran
+  // "Kurulu" gösterip İndir ve Kur'u gizlemez; kullanıcı bağımsız CLI'yi
+  // kurabilir. Anahtar yine de aynı config.toml üzerinden eklentiyi de
+  // yapılandırır.
+  return {
+    installed: false, command: null, version: null, installation: null,
+    profilePath: paths.profile, editorExtensions, wslEditors,
+  };
 }
 
-function removePath(target) {
-  try {
-    if (!fs.existsSync(target)) return { path: target, removed: false, reason: "not-found" };
-    fs.rmSync(target, { recursive: true, force: true });
-    return { path: target, removed: true };
-  } catch (error) {
-    return { path: target, removed: false, error: String(error?.message || error).slice(0, 300) };
-  }
-}
-
-function removeUserPathEntry(target) {
-  if (process.platform !== "win32") return { removed: false, reason: "not-windows" };
-  try {
-    const current = String(require("child_process").execFileSync("powershell.exe", ["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path', 'User')"], { windowsHide: true, encoding: "utf8" }) || "").trim();
-    const parts = current.split(";").filter(Boolean);
-    const next = parts.filter((part) => part.replace(/[\\/]+$/, "").toLowerCase() !== target.replace(/[\\/]+$/, "").toLowerCase());
-    if (next.length === parts.length) return { removed: false, reason: "not-found" };
-    const output = next.join(";");
-    execFileSyncSafe("powershell.exe", ["-NoProfile", "-Command", `[Environment]::SetEnvironmentVariable('Path', '${output.replace(/'/g, "''")}', 'User')`]);
-    return { removed: true };
-  } catch (error) {
-    return { removed: false, error: String(error?.message || error).slice(0, 300) };
-  }
-}
-
-function execFileSyncSafe(command, args) {
-  const { execFileSync } = require("child_process");
-  execFileSync(command, args, { windowsHide: true, stdio: "ignore" });
-}
-
+// A binary that is still executing cannot be deleted on Windows, so a removal
+// closes the CLI first. Deleting the files themselves is the removal module's
+// job; this only frees them.
 async function closeStandaloneProcesses(programBin, log) {
   if (process.platform !== "win32") return [];
   const escaped = programBin.replace(/'/g, "''");
@@ -179,90 +219,6 @@ async function closeStandaloneProcesses(programBin, log) {
     log?.warn("codex-cli", "Could not enumerate standalone Codex CLI processes", { error: sanitizeOutput(error?.message) });
     return [];
   }
-}
-
-// Removes the Cizi Code provider from the shared config. Only ever called when
-// no other Codex product is left to use it; while ChatGPT Desktop is installed
-// the shared config belongs to it too and is left alone.
-function removeSharedCiziConfig() {
-  try {
-    const state = codexConfig.readState();
-    if (!state.exists) return { changed: false, reason: "not-found" };
-    if (!state.hasProvider && state.modelProvider !== codexConfig.PROVIDER_ID) {
-      return { changed: false, reason: "not-present" };
-    }
-    return codexConfig.revertCizi({});
-  } catch (error) {
-    return { changed: false, error: String(error?.message || error).slice(0, 300) };
-  }
-}
-
-// `desktopInstalled` decides what may be touched: paths under ~/.codex that
-// belong only to the CLI are always fair game, but the shared root and the
-// shared config are protected whenever ChatGPT Desktop is still installed.
-async function uninstallCodexCli({ log, desktopInstalled, removeShared = false } = {}) {
-  const cliPaths = standalonePaths();
-  const keepShared = desktopInstalled !== false;
-  const clearShared = !keepShared && removeShared === true;
-  const before = await detectCodexCli();
-  const closedProcesses = await closeStandaloneProcesses(cliPaths.programBin, log);
-
-  const targets = [cliPaths.standaloneDir, cliPaths.programDir, cliPaths.profile];
-  const results = targets.map(removePath);
-  const pathResult = removeUserPathEntry(path.dirname(cliPaths.programBin));
-
-  // With Desktop still installed the shared config is its config too.
-  const sharedConfig = keepShared
-    ? { changed: false, reason: "desktop-installed" }
-    : removeSharedCiziConfig();
-
-  const sharedRoot = codexPaths.sharedPaths().root;
-  const sharedRemoval = clearShared ? removePath(sharedRoot) : { path: sharedRoot, removed: false, reason: keepShared ? "desktop-installed" : "not-requested" };
-
-  let npm = { removed: false, reason: "not-installed" };
-  try {
-    await execFileAsync(process.platform === "win32" ? "npm.cmd" : "npm", ["uninstall", "-g", "@openai/codex"], { timeout: 30000, windowsHide: true, maxBuffer: 256 * 1024 });
-    npm = { removed: true };
-  } catch (error) {
-    npm = { removed: false, error: sanitizeOutput(error?.message) };
-  }
-
-  const after = await detectCodexCli();
-  const failed = [...results, sharedRemoval].filter((item) => item.error);
-  const checked = clearShared ? [...targets, sharedRoot] : targets;
-  const stillExists = checked.filter((item) => fs.existsSync(item));
-  const preserved = keepShared
-    ? [sharedRoot, codexPaths.desktopPaths().runtimeDir, codexPaths.desktopPaths().packageStateDir].filter((item) => fs.existsSync(item))
-    : [];
-
-  log?.info("codex-cli", "Bağımsız Codex CLI kaldırma tamamlandı", {
-    removed: results.filter((item) => item.removed).length,
-    remaining: stillExists.length,
-    sharedCleared: clearShared,
-    desktopInstalled: keepShared,
-  });
-
-  return {
-    ok: failed.length === 0 && stillExists.length === 0,
-    before,
-    after,
-    removed: [...results, sharedRemoval].filter((item) => item.removed).map((item) => item.path),
-    failed,
-    stillExists,
-    closedProcesses,
-    path: pathResult,
-    profile: results[2],
-    sharedConfig,
-    sharedCleared: clearShared,
-    npm,
-    preserved,
-  };
-}
-
-async function planCodexCliUninstall({ desktopInstalled } = {}) {
-  const before = await detectCodexCli();
-  const plan = codexPaths.planRemoval({ target: "cli", otherInstalled: desktopInstalled !== false });
-  return { ...plan, cli: before };
 }
 
 function createCodexCliService({ userDataPath, log, onInstallState, detect = detectCodexCli, spawnProcess = spawn }) {
@@ -505,15 +461,51 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
     log?.info("codex-cli", "Codex CLI açıldı", { command: status.command, connected, modelSelection: "shared-catalog", launch: "direct-exe-in-new-console" });
     return { opened: true, command: status.command, connected, modelSelection: "shared-catalog" };
   };
+  // "Sadece indir": resmî yükleyici indirilenler klasörüne konur, çalıştırılmaz.
+  const downloadOnly = async () => {
+    if (process.platform !== "win32") throw new Error("Codex CLI yükleyicisi şu an yalnızca Windows'ta indirilebiliyor.");
+    emit({ status: "downloading", phase: "download", percent: 0, message: "Resmî Codex yükleyicisi indiriliyor...", operations: [] });
+    operation("download", { label: "Yükleyiciyi indir (manuel kurulum)", status: "running", percent: 0, detail: WINDOWS_INSTALLER_URL });
+    try {
+      const saved = await downloadForManualInstall({
+        url: WINDOWS_INSTALLER_URL,
+        fileName: "codex-cli-install.ps1",
+        label: "Codex yükleyicisi",
+        onProgress: ({ received, total, percent }) => {
+          operation("download", { percent, detail: total ? `${formatBytes(received)} / ${formatBytes(total)}` : formatBytes(received) });
+          emit({ percent: percent ?? 0 });
+        },
+      });
+      operation("download", { status: "done", percent: 100, detail: saved.path });
+      emit({ status: "installed", phase: "complete", percent: 100, message: `Yükleyici indirildi: ${saved.path}` });
+      return { downloaded: true, ...saved, runHint: "PowerShell'de: powershell -ExecutionPolicy Bypass -File \"<dosya>\"" };
+    } catch (error) {
+      const message = failureMessage(error);
+      operation("download", { status: "error", detail: message });
+      emit({ status: "error", phase: "error", message });
+      throw Object.assign(error, { userMessage: message });
+    }
+  };
+
   return {
     detect: detectCodexCli,
     install,
+    downloadOnly,
     open,
-    planUninstall: (options) => planCodexCliUninstall(options),
-    uninstall: (options) => uninstallCodexCli({ ...options, log }),
-    getInstallState: () => installState,
+    // Frees the binaries so a removal can delete them. Which files actually go
+    // is decided by the removal categories, not here.
+    closeProcesses: () => closeStandaloneProcesses(standalonePaths().programBin, log),
     officialSiteUrl: OFFICIAL_SITE_URL,
   };
 }
 
-module.exports = { createCodexCliService, detectCodexCli, uninstallCodexCli, planCodexCliUninstall, standalonePaths, OFFICIAL_SITE_URL };
+module.exports = {
+  createCodexCliService,
+  detectCodexCli,
+  standalonePaths,
+  vscodeCodexInstallations,
+  editorsRunningCodexInWsl,
+  VSCODE_EXTENSION_ID,
+  WSL_SETTING_KEY,
+  OFFICIAL_SITE_URL,
+};

@@ -168,21 +168,21 @@ check("turning it off removes every value Cizi added", () => {
 });
 
 // --------------------------------------------------------------- Claude Desktop
+// Claude Desktop is configured through exactly one surface: its own
+// configuration library. The registry-policy variant was never shipped as a
+// default and has been removed, so there is one config shape left to assert.
 const desktopModels = contract.desktopModels(claudeValues);
-const policyConfig = contract.buildPolicyConfig(claudeValues, desktopModels, "C:\\helper.exe");
 const libraryConfig = contract.buildConfigLibraryConfig(claudeValues, desktopModels, "C:\\helper.exe");
-const inferenceModels = JSON.parse(policyConfig.inferenceModels);
+const inferenceModels = libraryConfig.inferenceModels;
 
 check("no config key Claude Desktop does not have is written", () => {
   for (const key of contract.RETIRED_KEYS) {
-    assert.ok(!(key in policyConfig), `policy: ${key}`);
     assert.ok(!(key in libraryConfig), `config library: ${key}`);
   }
 });
 
 check("the requested surfaces are the ones turned on", () => {
   for (const [key, on] of Object.entries(contract.MANAGED_FEATURES)) {
-    assert.strictEqual(policyConfig[key], String(on), `policy: ${key}`);
     assert.strictEqual(libraryConfig[key], on, `config library: ${key}`);
   }
   assert.strictEqual(contract.MANAGED_FEATURES.chatTabEnabled, true);
@@ -209,7 +209,6 @@ check("isFamilyDefault only appears next to a tier", () => {
 });
 
 check("the API key never lands in the managed config", () => {
-  assert.ok(!JSON.stringify(policyConfig).includes(KEY));
   assert.ok(!JSON.stringify(libraryConfig).includes(KEY));
 });
 

@@ -66,11 +66,15 @@ function createBuildService({
   }
 
   function buildLabels(packageInfo, labelScan, rules) {
-    if (labelScan.problems.length) {
-      throw codedError(
-        "LABEL_TARGETS_UNRESOLVED",
-        `Etiket hedefleri dogrulanamadi: ${labelScan.problems.map((p) => `${p.ruleId}=${p.reason}`).join(", ")}`,
-      );
+    // Beklenenden farkli sayida eslesme artik islemi durdurmaz.
+    //
+    // Durdurmak sunu yapiyordu: JS icine gomulu TEK bir etiketin sayisi
+    // degistiginde, zaten basarili olmus BUTUN dil kataloglarinin cevirisi de
+    // atiliyordu. Ceviri kismi calisabilir - hedef, yapinin degismesine
+    // dayanmak (madde 6). Gozlem loglanir; kullanici Claude arayuzunde
+    // cevrilmeyen bir etiket gorse bile geri kalan ceviri yerinde durur.
+    for (const observation of labelScan.observations || []) {
+      logger.warning("build", "Etiket kurali beklenenden farkli sayida eslesti", observation);
     }
     if (!labelScan.sites.length) {
       logger.info("build", "Uygulanacak etiket yamasi yok (muhtemelen zaten cevrili)", {

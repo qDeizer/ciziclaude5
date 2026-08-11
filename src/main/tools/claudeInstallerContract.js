@@ -39,64 +39,6 @@ function installerStageFailure(code, publicMessage, stage, cause) {
 // could not report a percentage before the first poll landed, which is why the
 // download appeared to sit at nothing.
 
-function claudeCodeWingetPrerequisiteScript() {
-  return [
-    "$ErrorActionPreference='Stop'",
-    "$winget=Get-Command -Name 'winget.exe' -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1",
-    "if($null -eq $winget){throw 'CLAUDE_CODE_WINGET_MISSING'}",
-    "$null=& $winget.Source show --id Anthropic.ClaudeCode --exact --source winget --accept-source-agreements --disable-interactivity",
-    "if($LASTEXITCODE -ne 0){throw 'CLAUDE_CODE_WINGET_PACKAGE_UNAVAILABLE'}",
-    "[pscustomobject]@{winget=$true;packageId='Anthropic.ClaudeCode'}|ConvertTo-Json -Compress",
-  ].join("\n");
-}
-
-function claudeCodeWingetInstallScript() {
-  return [
-    "$ErrorActionPreference='Stop'",
-    "$heartbeat=$env:CIZI_CLAUDE_CODE_HEARTBEAT",
-    "if([string]::IsNullOrWhiteSpace($heartbeat)){throw 'The Claude Code installer heartbeat path is missing.'}",
-    "Remove-Item -LiteralPath $heartbeat -Force -ErrorAction SilentlyContinue",
-    "Remove-Item -LiteralPath ($heartbeat+'.stdout') -Force -ErrorAction SilentlyContinue",
-    "Remove-Item -LiteralPath ($heartbeat+'.stderr') -Force -ErrorAction SilentlyContinue",
-    "Remove-Item -LiteralPath ($heartbeat+'.exit') -Force -ErrorAction SilentlyContinue",
-    "$winget=Get-Command -Name 'winget.exe' -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1",
-    "if($null -eq $winget){throw 'CLAUDE_CODE_WINGET_MISSING'}",
-    "[IO.File]::WriteAllText($heartbeat,'.',[Text.Encoding]::ASCII)",
-    "$env:CIZI_WINGET_PATH=[string]$winget.Source;$env:CIZI_WINGET_EXIT=$heartbeat+'.exit'",
-    "$childScript=@'",
-    "$ErrorActionPreference='Continue'",
-    "& $env:CIZI_WINGET_PATH install --id Anthropic.ClaudeCode --exact --source winget --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity",
-    "$exitCode=[int]$LASTEXITCODE;[IO.File]::WriteAllText($env:CIZI_WINGET_EXIT,[string]$exitCode);exit $exitCode",
-    "'@",
-    "$encodedChild=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))",
-    "$powershell=Join-Path $PSHOME 'powershell.exe'",
-    "$process=Start-Process -FilePath $powershell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encodedChild) -NoNewWindow -PassThru -RedirectStandardOutput ($heartbeat+'.stdout') -RedirectStandardError ($heartbeat+'.stderr')",
-    "while(-not $process.HasExited){[IO.File]::AppendAllText($heartbeat,'.',[Text.Encoding]::ASCII);Start-Sleep -Seconds 5;$process.Refresh()}",
-    "$process.WaitForExit();$process.Refresh()",
-    "[IO.File]::AppendAllText($heartbeat,'.',[Text.Encoding]::ASCII)",
-    "$exitPath=$heartbeat+'.exit';if(-not (Test-Path -LiteralPath $exitPath -PathType Leaf)){throw 'CLAUDE_CODE_WINGET_INSTALL_FAILED (exit code unavailable)'}",
-    "$exitText=(Get-Content -LiteralPath $exitPath -Raw).Trim();if($exitText -notmatch '^\\d+$'){throw 'CLAUDE_CODE_WINGET_INSTALL_FAILED (exit code invalid)'}",
-    "if([int]$exitText -ne 0){throw ('CLAUDE_CODE_WINGET_INSTALL_FAILED (exit code {0})' -f [int]$exitText)}",
-  ].join("\n");
-}
-
-function cliWingetPrerequisiteFailure(error) {
-  const text = [error?.message, error?.stdout, error?.stderr].filter(Boolean).join("\n");
-  const known = [
-    ["CLAUDE_CODE_WINGET_MISSING", "Windows Package Manager (WinGet) is required for the one-click Claude Code installation. Use the official setup link if WinGet is unavailable."],
-    ["CLAUDE_CODE_WINGET_PACKAGE_UNAVAILABLE", "The official Anthropic Claude Code package is currently unavailable from WinGet. Try again or use the official setup link."],
-  ];
-  for (const [code, message] of known) {
-    if (text.includes(code)) return installerFailure(code, message, { stage: "prerequisite" });
-  }
-  return installerStageFailure(
-    "CLAUDE_CODE_PREREQUISITE_CHECK_FAILED",
-    "Cizi Code could not verify the official Claude Code package in WinGet.",
-    "prerequisite",
-    error,
-  );
-}
-
 // Claude Desktop is not shaped like the other tools this app installs. Its
 // official MSIX registers a packaged Windows service that runs as localSystem
 // (CoworkVMService) and declares firewall rules, so Windows refuses a per-user
@@ -108,7 +50,6 @@ function cliWingetPrerequisiteFailure(error) {
 // The package is therefore always installed through an elevated child process.
 // How Cizi Code itself was started (from source or from a packaged build) has
 // no bearing on that requirement, so it must never decide the install mode.
-const CLAUDE_DESKTOP_INSTALL_REQUIRES_ELEVATION = true;
 
 // The exit codes the outer (unelevated) install script uses. They separate a
 // declined administrator prompt from a deployment that actually ran and failed,
@@ -257,7 +198,6 @@ function claudeDesktopInstallScript(targetPath, resultPath) {
 module.exports = {
   CLAUDE_DESKTOP_MSIX_URLS,
   CLAUDE_DESKTOP_MSIX_URL,
-  CLAUDE_DESKTOP_INSTALL_REQUIRES_ELEVATION,
   CLAUDE_DESKTOP_INSTALL_EXIT,
   CLAUDE_DESKTOP_DEPLOYMENT_ERRORS,
   claudeDesktopDeploymentHresult,
@@ -265,8 +205,5 @@ module.exports = {
   claudeDesktopMsixUrl,
   installerFailure,
   installerStageFailure,
-  claudeCodeWingetPrerequisiteScript,
-  claudeCodeWingetInstallScript,
-  cliWingetPrerequisiteFailure,
   claudeDesktopInstallScript,
 };

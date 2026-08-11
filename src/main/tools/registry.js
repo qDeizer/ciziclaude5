@@ -8,6 +8,16 @@ const path = require("path");
 const codexConfig = require("../codexConfigFile");
 const codexModelCatalog = require("../codexModelCatalog");
 const log = require("../logger");
+// Yedek baytla tutulduğu için içeriğe erişim onun çözücüleriyle yapılır; burada
+// `content` alanını doğrudan okumak eski (metin) biçimi varsaymak olurdu.
+const backup = require("./backup");
+// Claude Code CLI'nin ayar dosyasinin yeri CLAUDE_CONFIG_DIR ile tasinabilir;
+// yazan ve dogrulayan ayni cozumleyiciyi kullanmali.
+const { claudeSettingsFile } = require("../claudePaths");
+// Every file below belongs to somebody else's application. They are replaced,
+// never truncated in place: a process that dies mid-write must not be able to
+// leave a user with an unreadable settings file.
+const { writeFileAtomic } = require("../fsAtomic");
 const {
   DEFAULT_REASONING_EFFORT,
   capabilityFor,
@@ -25,15 +35,7 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return null; }
 }
 function writeJson(file, obj) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(obj, null, 2));
-}
-function readText(file) {
-  try { return fs.readFileSync(file, "utf-8"); } catch { return null; }
-}
-function writeText(file, text) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, text);
+  writeFileAtomic(file, JSON.stringify(obj, null, 2));
 }
 
 // VS Code user-settings path (per-OS) for extension-based tools (Kilo / Roo).
@@ -100,9 +102,9 @@ function claudeEffortLevel(v) {
 const TOOLS = {
   "claude-code": {
     id: "claude-code", name: "Claude Code CLI", apiType: "anthropic",
-    files: () => [path.join(home(), ".claude", "settings.json")],
+    files: () => [claudeSettingsFile()],
     apply(v) {
-      const file = path.join(home(), ".claude", "settings.json");
+      const file = claudeSettingsFile();
       const cur = readJson(file) || {};
       const profiles = profileMap(v, "claude-code");
       const nextEnv = {
@@ -140,7 +142,7 @@ const TOOLS = {
     // require the URL to match it, so a tool pointed at a *different* endpoint (e.g. the
     // user's own/local gateway) is correctly reported as "not connected".
     isApplied(expectedBase) {
-      const cfg = readJson(path.join(home(), ".claude", "settings.json"));
+      const cfg = readJson(claudeSettingsFile());
       const url = cfg?.env?.ANTHROPIC_BASE_URL;
       const complete = Boolean(url
         && cfg?.env?.ANTHROPIC_AUTH_TOKEN
@@ -158,7 +160,7 @@ const TOOLS = {
       return expectedBase ? url === withV1(expectedBase) : true;
     },
     matches(v) {
-      const cfg = readJson(path.join(home(), ".claude", "settings.json"));
+      const cfg = readJson(claudeSettingsFile());
       const env = cfg?.env || {};
       const profiles = profileMap(v, "claude-code");
       const expectedModels = claudeAvailableModels(v);
@@ -178,7 +180,7 @@ const TOOLS = {
         && expectedModels.every((model) => cfg.availableModels.includes(model));
     },
     cleanup(expectedBase) {
-      const file = path.join(home(), ".claude", "settings.json");
+      const file = claudeSettingsFile();
       const cfg = readJson(file);
       if (!cfg?.env) return { changed: false, reason: "missing-env" };
 
@@ -244,7 +246,7 @@ const TOOLS = {
         });
       } catch (error) {
         try {
-          if (catalogExisted) fs.writeFileSync(catalogPath, previousCatalog, "utf8");
+          if (catalogExisted) writeFileAtomic(catalogPath, previousCatalog);
           else fs.rmSync(catalogPath, { force: true });
           log.warning("codex", "Codex yapılandırması tamamlanamadı; model kataloğu geri alındı", { rollback: true, modelCount: v.models?.length || 0 });
         } catch (rollbackError) {
@@ -294,8 +296,10 @@ const TOOLS = {
       if (expectedBase && state.baseUrl && state.baseUrl !== codexConfig.withV1(expectedBase)) {
         return { changed: false, reason: "different-endpoint" };
       }
-      const previousContent = (snapshot?.files || []).find((f) => f.path === codexConfig.configPath() && f.existed)?.content;
-      const previous = codexConfig.readPreviousFromSnapshot(previousContent);
+      // Yedek baytla tutulur; buradaki iş eski DEĞERLERİ okumak olduğu için
+      // metne çevrilir. Dosyaya yazma yine baytla yapılır (aşağıda katalog).
+      const configSnapshot = (snapshot?.files || []).find((f) => f.path === codexConfig.configPath() && f.existed);
+      const previous = codexConfig.readPreviousFromSnapshot(backup.snapshotText(configSnapshot));
       const result = codexConfig.revertCizi({
         previousModel: previous.model,
         previousModelProvider: previous.modelProvider,
@@ -306,8 +310,7 @@ const TOOLS = {
       });
       const catalogSnapshot = (snapshot?.files || []).find((f) => f.path === codexModelCatalog.catalogPath());
       if (catalogSnapshot?.existed) {
-        fs.mkdirSync(path.dirname(codexModelCatalog.catalogPath()), { recursive: true });
-        fs.writeFileSync(codexModelCatalog.catalogPath(), catalogSnapshot.content, "utf8");
+        writeFileAtomic(codexModelCatalog.catalogPath(), backup.snapshotBytes(catalogSnapshot));
       } else {
         fs.rmSync(codexModelCatalog.catalogPath(), { force: true });
       }

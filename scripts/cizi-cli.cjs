@@ -52,7 +52,8 @@ function usage() {
         "cizi-cli screen",
         "cizi-cli list",
         "cizi-cli click login-btn",
-        "cizi-cli switch tool.claude.switch on",
+        "cizi-cli switch tool.claude-code.switch on",
+        "cizi-cli switch tool.claude-desktop.switch on",
         "cizi-cli switch tool.codex.switch on",
         "cizi-cli click tool.reconcile-all",
         "cizi-cli click codex-desktop.install",
@@ -60,6 +61,12 @@ function usage() {
         "cizi-cli click claude-desktop.install",
         "cizi-cli click claude-desktop.purge",
         "cizi-cli select period-select 7d",
+        "# Bölünmüş düğmenin açılır listesi: önce oku aç, sonra içindeki eylemi tıkla",
+        "cizi-cli click codex-cli.install.more",
+        "cizi-cli click codex-cli.download-only",
+        "cizi-cli click codex-cli.purge.more",
+        "cizi-cli click codex-cli.category.sessions",
+        "cizi-cli click codex-cli.remove-selected",
       ],
       guarantee: "Mutating commands resolve and trigger the renderer UI control; they do not call application services directly.",
     },
@@ -95,14 +102,18 @@ function request(state, payload) {
     // Installs and root removals run an official third-party installer or the
     // Windows package manager, so they get the long timeout.
     const LONG_ACTIONS = [
-      "claude-code-cli.install", "claude-code-cli.purge",
+      "claude-code-cli.install", "claude-code-cli.download-only",
+      "claude-code-cli.purge", "claude-code-cli.remove-selected",
       // Claude Desktop is the longest of them all: a quarter-gigabyte download
       // followed by an elevated package registration.
-      "claude-desktop.install", "claude-desktop.purge",
-      "codex-cli.install", "codex-cli.purge",
-      "codex-desktop.install", "codex-desktop.purge",
+      "claude-desktop.install", "claude-desktop.download-only",
+      "claude-desktop.purge", "claude-desktop.remove-selected", "claude-desktop.repair",
+      "codex-cli.install", "codex-cli.download-only",
+      "codex-cli.purge", "codex-cli.remove-selected",
+      "codex-desktop.install",
+      "codex-desktop.purge", "codex-desktop.remove-selected",
       "tool.reconcile-all",
-      "tool.claude.switch",
+      "tool.claude-code.switch", "tool.claude-desktop.switch", "tool.codex.switch",
     ];
     const timeoutMs = ["click", "switch"].includes(payload?.type) && LONG_ACTIONS.includes(payload?.id)
       ? LONG_ACTION_TIMEOUT_MS

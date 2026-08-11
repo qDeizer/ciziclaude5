@@ -16,7 +16,6 @@ const { codedError, sha256Buffer, listFiles } = require("./fsx");
 // id semasi: "<grup>" tek dilli katalog icin, "<grup>:<locale>" digerleri icin.
 // Anahtar bazli ceviri sozlugu yalnizca en-US id'lerini kullanir; token
 // kurallari (marka terimi degisimi) butun kataloglara uygulanir.
-const CATALOG_GROUP_NAMES = ["main-process", "renderer", "renderer-dynamic"];
 const PRIMARY_LOCALE = "en-US";
 const LOCALE_FILE = /^([a-z]{2}(?:-[A-Za-z0-9]+)?)(\.overrides)?\.json$/;
 
@@ -192,19 +191,32 @@ function createTargetScanner({ logger }) {
       }
     }
 
-    // Belirsizlik hatadir: beklenen sayida eslesme yoksa yama uretilmez.
-    const problems = [];
+    // Sayi bir GECERLILIK KOSULU DEGIL, bir GOZLEMDIR.
+    //
+    // Eskiden `expectedMatches` bir esikti: bulunan sayi beklenenden farkliysa
+    // hicbir yama uretilmiyordu. Bunun bedeli sudur - Claude bir sonraki
+    // surumde ayni etiketi ikinci bir yere koyarsa, butun ceviri (butun
+    // dillerdeki katalog yamasi dahil) tek bir sayi yuzunden duser.
+    //
+    // Dogru olani her ONAYLANMIS eslesmeyi yamalamak. Yanlis yere yazmayi
+    // engelleyen sey sayi degil, komsu isaret dogrulamasidir
+    // (siblingMarkers/minSiblings): bir eslesme baglamini kanitlamadan zaten
+    // `sites` listesine giremiyor. Sayi yalnizca raporlanir, boylece yapinin
+    // degistigi gorulur ama islem durmaz.
+    const observations = [];
     for (const rule of rules) {
-      const ruleSites = sites.filter((site) => site.ruleId === rule.id);
+      const found = sites.filter((site) => site.ruleId === rule.id).length;
       const expected = Number(rule.expectedMatches) || 1;
       const skipped = alreadyTranslated.some((entry) => entry.ruleId === rule.id);
-      if (ruleSites.length === expected) continue;
-      if (!ruleSites.length && skipped) continue;
-      problems.push({
+      if (found === expected || (!found && skipped)) continue;
+      observations.push({
         ruleId: rule.id,
         expected,
-        found: ruleSites.length,
-        reason: ruleSites.length === 0 ? "MARKER_NOT_FOUND" : "AMBIGUOUS_MATCH",
+        found,
+        // Sifir eslesme: bu surumde etiket kataloga tasinmis olabilir; katalog
+        // gecisi onu yine cevirir. Beklenenden fazla: yeni bir kullanim yeri
+        // eklenmis, hepsi cevrilir.
+        reason: found === 0 ? "MARKER_NOT_FOUND" : "MORE_SITES_THAN_EXPECTED",
       });
     }
 
@@ -214,10 +226,10 @@ function createTargetScanner({ logger }) {
       contextRejected: rejections.length,
       alreadyTranslated: alreadyTranslated.length,
     });
-    for (const problem of problems) {
-      logger.error("scan", "Etiket kurali dogrulanamadi", problem);
+    for (const observation of observations) {
+      logger.warning("scan", "Etiket kurali beklenenden farkli sayida eslesti; yama yine uygulanacak", observation);
     }
-    return { sites, rejections, alreadyTranslated, problems, scannedFiles };
+    return { sites, rejections, alreadyTranslated, observations, scannedFiles };
   }
 
   // app.asar bir arsivdir; header'da offset+size tutar. Uzunluk degistiren bir
@@ -283,11 +295,4 @@ function createTargetScanner({ logger }) {
   return { scan, scanCatalogs, scanLabelSites, inspectAsar, matchRuleInContent };
 }
 
-module.exports = {
-  createTargetScanner,
-  CATALOG_GROUP_NAMES,
-  PRIMARY_LOCALE,
-  catalogDirectories,
-  contentPath,
-  looksLikeCatalog,
-};
+module.exports = { createTargetScanner };

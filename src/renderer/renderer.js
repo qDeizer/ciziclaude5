@@ -1,48 +1,91 @@
+// Cizi Code arayüzü.
+//
+// YERLEŞİM FİKRİ: ürün başına KART. Bir kart o ürün hakkındaki her şeyi taşır —
+// durumu, tek satır olgusu, anahtarı, eylemleri ve o an süren işin ilerlemesi.
+// Önceki tasarımda ilerleme kutuları listenin altındaydı ve hangi satıra ait
+// oldukları belirsizdi; artık ilerleme ait olduğu kartın içinde doğar ve biter.
+//
+// TEK İLERLEME KANALI: ana süreçten gelen her uzun iş (anahtar çevirme, kurulum,
+// indirme, kaldırma) aynı biçimi kullanır — { scope, percent, message, done }.
+// Böylece ekranda dört farklı ilerleme çizimi yerine bir tane var.
+
 function $(id) {
   const el = document.getElementById(id);
   if (!el) console.error("Missing element:", id);
   return el;
 }
 
-var cizi = window.cizi;
-var TEMPLATES = null;
-var CLAUDE_CLI_STATUS = { installed: false, command: null, version: null };
-var CLAUDE_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
-var CLAUDE_STATE = { cli: { installed: false, applied: false }, desktop: { installed: false, applied: false }, connected: false, installedProducts: [] };
-var CLAUDE_PROGRESS = { phase: "idle", message: "", details: null };
-var CLAUDE_INSTALL_BUTTON = null;
-var CODEX_CLI_STATUS = { installed: false, command: null, version: null };
-var CODEX_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
-var CODEX_DESKTOP_STATUS = { installed: false, version: null, packageFullName: null };
-var CODEX_DESKTOP_INSTALL_STATE = { status: "idle", percent: 0, message: "" };
-var CODEX_CONFIG_STATE = { applied: false, model: null, path: null };
-var ME = null;
-var LOG_TIMER = null;
-var LAST_USAGE_REFRESH = null;
-const CLAUDE_CODE_CLI_TOOL_ID = "claude-code";
-const CLAUDE_CODE_CLI_NAME = "Claude Code CLI";
-const CODEX_CLI_TOOL_ID = "codex";
-const CODEX_CLI_NAME = "Codex CLI";
-const CLAUDE_DESKTOP_NAME = "Claude Desktop";
-const CODEX_DESKTOP_NAME = "ChatGPT Desktop";
-var FIRST_RELEASE_TOOLS = [CLAUDE_CODE_CLI_TOOL_ID, CODEX_CLI_TOOL_ID];
-
-// The key's own model list decides which local products it may configure.
+// `cizi` BİLEREK yeniden bildirilmiyor: contextBridge onu global olarak tanımlar
+// ve aynı adı `const` ile bildirmek betiği "Identifier 'cizi' has already been
+// declared" ile yükleme anında düşürür — ekran da varsayılan giriş görünümünde
+// takılı kalır. Köprü doğrudan global olarak kullanılır.
 const { modelName, modelNames, modelBelongsToFamily, modelsForTool, toolIsUnlocked, toolIsGated } = window.ciziModelFamilies;
-// Same module the main process uses to build the configs, so the screen and the
-// files on disk can never describe a model differently.
-const { capabilityFor } = window.ciziModelCapabilities;
+// Aynı modül ana sürecin yapılandırmayı kurarken kullandığı modül: ekran ile
+// diskteki dosya bir modeli farklı anlatamaz.
+const { capabilityFor, displayModelName } = window.ciziModelCapabilities;
+
+// Anahtar kimlikleri, ana sürecin bildirdiği gibi. Claude Code CLI ve Claude
+// Desktop iki ayrı anahtar: ortak ayar dosyaları yok, biri çalışmazsa diğeri
+// çalışmaya devam eder. Codex tek anahtar: iki ürünü de aynı config.toml okuyor.
+const CLAUDE_CODE = "claude-code";
+const CLAUDE_DESKTOP = "claude-desktop";
+const CODEX = "codex";
+const CODEX_CLI_PRODUCT = "codex-cli";
+const CODEX_DESKTOP_PRODUCT = "codex-desktop";
+const SWITCH_IDS = [CLAUDE_CODE, CLAUDE_DESKTOP, CODEX];
+
+const NAMES = {
+  [CLAUDE_CODE]: "Claude Code CLI",
+  [CLAUDE_DESKTOP]: "Claude Desktop",
+  [CODEX_CLI_PRODUCT]: "Codex CLI",
+  [CODEX_DESKTOP_PRODUCT]: "ChatGPT Desktop",
+};
+
+let TEMPLATES = null;
+let ME = null;
+let CLAUDE_STATE = { cli: { installed: false }, desktop: { installed: false } };
+let CODEX_STATE = { cli: { installed: false }, desktop: { installed: false }, config: { applied: false } };
+let LAST_REFRESH = null;
+
+// ----------------------------------------------------------------- yardımcı
+
+function toast(message, kind = "") {
+  const element = $("toast");
+  element.textContent = message;
+  element.className = `toast ${kind}`;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => element.classList.add("hidden"), 4200);
+}
+
+function clog(level, message, meta) {
+  try { cizi.clientLog(level, message, meta); } catch { /* günlük arayüzü bozmaz */ }
+}
+
+// Ana süreçten gelen hata metni kullanıcıya gösterilmeden önce süzülür: içinde
+// sağlayıcı adı ya da uç nokta geçen bir mesaj kullanıcıya ait bilgi değildir.
+function clientMessage(message) {
+  const text = String(message || "").trim();
+  if (!text) return "Cizi Code bu isteği tamamlayamadı.";
+  if (/[{}]/.test(text) || /(command\s*code|commandcode|deepseek|qwen|provider|upstream|backend|model endpoint|\/v1\/models)/i.test(text)) {
+    return "Cizi Code bu isteği tamamlayamadı.";
+  }
+  return text;
+}
 
 function contextLabel(tokens) {
   return tokens >= 1_000_000 ? `${Number((tokens / 1_000_000).toFixed(1))}M` : `${Math.round(tokens / 1000)}K`;
 }
 
-function clog(level, msg, meta) {
-  try {
-    cizi.clientLog(level, msg, meta);
-  } catch (_) {
-    // Logging must never break the UI.
-  }
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "—";
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function token(name) {
+  return getComputedStyle(document.body).getPropertyValue(name).trim();
 }
 
 function show(view) {
@@ -50,476 +93,336 @@ function show(view) {
   $("dash-view").classList.toggle("hidden", view !== "dash");
 }
 
-function toast(msg, kind = "") {
-  const t = $("toast");
-  t.textContent = msg;
-  t.className = `toast ${kind}`;
-  setTimeout(() => t.classList.add("hidden"), 3200);
-}
+// ---------------------------------------------------------------- ilerleme
+//
+// scope = kartın ya da ürün şeridinin kimliği. Bir kart yeniden çizildiğinde
+// ilerleme kaybolmasın diye durum burada tutulur, DOM'da değil.
+const PROGRESS = new Map();
 
-function clientMessage(message) {
-  const text = String(message || "").trim();
-  if (!text) return "Cizi Code could not complete the request.";
-  if (/[{}]/.test(text) || /(command\s*code|commandcode|deepseek|qwen|provider|upstream|gateway|backend|model endpoint|\/v1\/models)/i.test(text)) {
-    return "Cizi Code could not complete the request.";
+function setProgress(scope, next) {
+  if (!scope) return;
+  const current = PROGRESS.get(scope) || {};
+  const merged = { ...current, ...next };
+  if (merged.done && !merged.failed) {
+    // Bitmiş bir iş kısa süre görünür kalır: kullanıcı "tamamlandı"yı görsün,
+    // sonra kart sadeleşsin.
+    PROGRESS.set(scope, merged);
+    paintLane(scope);
+    clearTimeout(current.timer);
+    merged.timer = setTimeout(() => { PROGRESS.delete(scope); paintLane(scope); }, 3200);
+    return;
   }
-  return text;
+  clearTimeout(current.timer);
+  PROGRESS.set(scope, merged);
+  paintLane(scope);
 }
 
-function percentText(value) {
-  if (value == null) return "Unlimited";
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "Unlimited";
-  return String(Math.max(0, Math.min(100, Math.round(n))));
+function clearProgress(scope) {
+  const current = PROGRESS.get(scope);
+  if (current?.timer) clearTimeout(current.timer);
+  PROGRESS.delete(scope);
+  paintLane(scope);
 }
+
+function paintLane(scope) {
+  const lane = document.querySelector(`[data-lane="${scope}"]`);
+  if (!lane) return;
+  const state = PROGRESS.get(scope);
+  lane.hidden = !state;
+  if (!state) return;
+
+  const percent = Number(state.percent);
+  // Some installers genuinely report a numeric 0%. Keep that distinct from an
+  // unknown percentage, which remains an honest indeterminate animation.
+  const measurable = Number.isFinite(percent) && (percent > 0 || state.determinate === true);
+  lane.querySelector(".lane-label").textContent = state.label || "Çalışıyor";
+  lane.querySelector(".lane-pct").textContent = state.failed
+    ? "durdu"
+    : measurable ? `%${Math.round(Math.min(100, percent))}` : "";
+  lane.querySelector(".lane-detail").textContent = state.message || "";
+
+  const fill = lane.querySelector(".lane-fill");
+  fill.className = "lane-fill";
+  if (state.failed) {
+    fill.classList.add("failed");
+  } else if (measurable) {
+    fill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+    if (state.done) fill.classList.add("done");
+  } else {
+    // Ölçülemeyen adımda yüzde uydurulmaz.
+    fill.classList.add("indeterminate");
+  }
+}
+
+function laneElement(scope) {
+  const lane = document.createElement("div");
+  lane.className = "lane";
+  lane.dataset.lane = scope;
+  lane.hidden = true;
+  lane.innerHTML = '<div class="lane-head"><span class="lane-label"></span><span class="lane-pct num"></span></div>'
+    + '<div class="lane-track"><span class="lane-fill"></span></div>'
+    + '<div class="lane-detail"></div>';
+  return lane;
+}
+
+// Ana süreçteki üç eski kurulum kanalı ile yeni tek kanal aynı biçime çevrilir,
+// böylece çizim yolu tektir.
+function adoptInstallState(scope, label, phaseLabels = {}) {
+  return (state) => setProgress(scope, {
+    label: phaseLabels[String(state?.phase || "")] || label,
+    percent: state?.percent,
+    determinate: state?.determinate === true,
+    message: state?.message || "",
+    done: state?.status === "installed",
+    failed: state?.status === "error",
+  });
+}
+
+// ------------------------------------------------------------------- giriş
 
 async function doLogin() {
-  const errEl = $("login-error");
-  errEl.classList.add("hidden");
-  const keyEl = $("login-key");
-  const key = (keyEl.value || "").trim();
+  const errorElement = $("login-error");
+  errorElement.classList.add("hidden");
+  const key = ($("login-key").value || "").trim();
   if (!key) {
-    errEl.textContent = "API key is required.";
-    errEl.classList.remove("hidden");
-    clog("warn", "Sign in failed: missing API key");
+    errorElement.textContent = "API anahtarı gerekli.";
+    errorElement.classList.remove("hidden");
     return;
   }
-
-  const btn = $("login-btn");
-  btn.disabled = true;
-  btn.textContent = "Signing in...";
-  clog("info", "Sign in attempt");
-
-  const res = await cizi.login(key);
-  btn.disabled = false;
-  btn.textContent = "Sign In";
-
-  if (!res || !res.ok) {
-    errEl.textContent = clientMessage(res?.error || "Sign in failed.");
-    errEl.classList.remove("hidden");
+  const button = $("login-btn");
+  button.disabled = true;
+  button.textContent = "Giriş yapılıyor...";
+  const result = await cizi.login(key);
+  button.disabled = false;
+  button.textContent = "Giriş Yap";
+  if (!result?.ok) {
+    errorElement.textContent = clientMessage(result?.error || "Giriş yapılamadı.");
+    errorElement.classList.remove("hidden");
     return;
   }
-
   await enterDashboard();
 }
 
 async function enterDashboard() {
   show("dash");
-  const sess = await cizi.getSession();
-  if (sess.ok && sess.data?.gateway) $("conn-base").textContent = sess.data.gateway;
-  await refreshDashboardData();
-  await loadLogs();
+  const session = await cizi.getSession();
+  if (session.ok && session.data?.gateway) $("conn-base").textContent = session.data.gateway;
+  await refreshAll();
   await refreshUpdateState();
-  startLogAutoRefresh();
 }
 
-async function refreshDashboardData() {
-  await loadMe();
+async function refreshAll() {
+  await loadAccount();
   await loadUsage($("period-select").value);
-  await loadTemplatesAndTools();
-  LAST_USAGE_REFRESH = new Date();
-  renderLastUpdated();
+  await loadTools();
+  LAST_REFRESH = new Date();
+  renderLastRefresh();
 }
 
-async function loadMe() {
-  const res = await cizi.getMe();
-  if (!res.ok) {
-    toast(clientMessage(res.error || "Account details could not be loaded."), "bad");
+async function loadAccount() {
+  const result = await cizi.getMe();
+  if (!result.ok) {
+    toast(clientMessage(result.error || "Hesap bilgileri yüklenemedi."), "bad");
     return;
   }
-  ME = res.data;
+  ME = result.data;
   renderQuota(ME);
   renderModels(ME.combos || []);
 }
 
 function renderQuota(me) {
-  const pct = me.remainingPercent;
-  const display = percentText(pct);
-  $("quota-pct").textContent = display === "Unlimited" ? "100" : display;
-  $("quota-note").textContent = display === "Unlimited"
-    ? "Your plan is currently unlimited."
-    : `${display}% of your usage allowance remains.`;
+  const remaining = me.remainingPercent;
+  const unlimited = remaining == null || !Number.isFinite(Number(remaining));
+  const percent = unlimited ? 100 : Math.max(0, Math.min(100, Math.round(Number(remaining))));
+  $("quota-pct").textContent = unlimited ? "∞" : `%${percent}`;
+  const fill = $("quota-fill");
+  fill.style.width = `${percent}%`;
+  fill.className = `meter-fill${!unlimited && percent <= 10 ? " bad" : !unlimited && percent <= 30 ? " warn" : ""}`;
+  $("quota-meter").title = unlimited
+    ? "Planınız şu an sınırsız."
+    : `Kullanım hakkınızın %${percent}'i kaldı.`;
 
-  const r = 52;
-  const circ = 2 * Math.PI * r;
-  const ring = $("ring-fg");
-  ring.style.strokeDasharray = String(circ);
-  const frac = pct == null ? 1 : Math.max(0, Math.min(1, Number(pct) / 100));
-  ring.style.strokeDashoffset = String(circ * (1 - frac));
-  ring.style.stroke = pct != null && pct <= 10 ? "var(--bad)" : pct != null && pct <= 30 ? "var(--warn)" : "var(--usage-ring)";
-
-  const limitEl = $("limit-msg");
-  if (me.isLimitReached) {
-    limitEl.textContent = me.limitMessage || "Your Cizi Code usage limit has been reached.";
-    limitEl.classList.remove("hidden");
-  } else {
-    limitEl.classList.add("hidden");
-  }
+  const limit = $("limit-msg");
+  limit.textContent = me.isLimitReached ? (me.limitMessage || "Cizi Code kullanım sınırınıza ulaşıldı.") : "";
+  limit.classList.toggle("hidden", !me.isLimitReached);
 }
 
-function renderLastUpdated() {
-  const el = $("usage-updated");
-  if (!LAST_USAGE_REFRESH) {
-    el.textContent = "Not refreshed yet";
-    return;
-  }
-  el.textContent = `Last updated ${LAST_USAGE_REFRESH.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  })}`;
+function renderLastRefresh() {
+  $("usage-updated").textContent = LAST_REFRESH
+    ? `Son yenileme ${LAST_REFRESH.toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`
+    : "Henüz yenilenmedi";
 }
 
 function renderModels(models) {
   const box = $("model-chips");
   box.innerHTML = "";
   if (!models.length) {
-    const c = document.createElement("div");
-    c.className = "chip empty";
-    c.textContent = "No models are available yet";
-    box.appendChild(c);
+    const chip = document.createElement("div");
+    chip.className = "chip empty";
+    chip.textContent = "Henüz model yok";
+    box.appendChild(chip);
     return;
   }
   for (const model of models) {
-    // The account list mixes both families, and the thinking levels differ per
-    // family, so the chip has to be read with the right tool's contract.
-    const toolId = modelBelongsToFamily(modelName(model), "codex") ? "codex" : "claude-code";
+    // Hesap listesi iki aileyi birlikte döner ve düşünme seviyeleri aileye göre
+    // değişir; çip doğru aracın sözleşmesiyle okunmalı.
+    const toolId = modelBelongsToFamily(modelName(model), CODEX) ? CODEX : CLAUDE_CODE;
     const profile = capabilityFor(model, toolId);
-    const c = document.createElement("div");
-    c.className = "chip";
-    // Only what the model actually has: claiming 1M on every chip made the list
-    // meaningless once models with a smaller window appeared.
-    c.textContent = `${profile.name} · ${contextLabel(profile.contextWindowTokens)}`;
-    c.title = `${profile.name} · ${profile.contextWindowTokens.toLocaleString("tr-TR")} token bağlam`
+    const chip = document.createElement("div");
+    chip.className = "chip";
+    // Ekranda tire yerine boşluk: "Opus 5". Yapılandırmaya yazılan ad değişmez.
+    chip.append(document.createTextNode(`${displayModelName(profile.name)} `));
+    const meta = document.createElement("span");
+    meta.className = "chip-meta";
+    meta.textContent = contextLabel(profile.contextWindowTokens);
+    chip.appendChild(meta);
+    chip.title = `${profile.name} · ${profile.contextWindowTokens.toLocaleString("tr-TR")} token bağlam`
       + ` · düşünme seviyeleri: ${profile.reasoningLevels.join(", ")}`;
-    box.appendChild(c);
+    box.appendChild(chip);
   }
 }
 
 async function loadUsage(period) {
-  const res = await cizi.getUsage(period);
-  if (!res.ok) {
-    toast(clientMessage(res.error || "Usage trend could not be loaded."), "bad");
+  const result = await cizi.getUsage(period);
+  if (!result.ok) {
+    toast(clientMessage(result.error || "Kullanım eğilimi yüklenemedi."), "bad");
     return;
   }
-  drawChart(normalizeUsageChart(res.data));
-}
-
-function normalizeUsageChart(payload) {
+  const payload = result.data;
   const raw = payload?.chart || payload?.usage?.chart || payload?.data?.chart || [];
-  return Array.isArray(raw) ? raw : [];
+  const series = Array.isArray(raw) ? raw : [];
+  // Eğilim çubuklarının hangi alandan geldiği sunucu sürümüne göre değişiyor.
+  // Hangi alanın okunduğu kaydedilir, böylece "grafik boş" durumunun sebebi
+  // tahmin edilmek zorunda kalmaz.
+  clog("debug", "Kullanım eğilimi çizildi", {
+    period,
+    points: series.length,
+    positive: series.filter((point) => chartValue(point) > 0).length,
+    sampleKeys: series.length ? Object.keys(series[0]).slice(0, 8) : [],
+  });
+  drawChart(series);
 }
 
 function chartValue(point) {
-  const value = Number(
-    point?.percent ??
-    point?.usagePercent ??
-    point?.remainingPercent ??
-    point?.tokens ??
-    point?.totalLimitTokens ??
-    point?.totalTokens ??
-    0
-  );
+  const value = Number(point?.percent ?? point?.usagePercent ?? point?.remainingPercent
+    ?? point?.tokens ?? point?.totalLimitTokens ?? point?.totalTokens ?? 0);
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 function drawChart(data) {
   const canvas = $("usage-chart");
+  const width = canvas.clientWidth || canvas.parentElement.clientWidth || 320;
+  const height = 150;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
   const ctx = canvas.getContext("2d");
-  const W = canvas.clientWidth || canvas.parentElement.clientWidth - 36;
-  const H = 180;
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, W, H);
-  const pad = { l: 8, r: 8, t: 10, b: 22 };
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
   const values = data.map(chartValue);
+  const soft = token("--ink-soft");
   if (!data.length || values.every((value) => value <= 0)) {
-    ctx.fillStyle = "#5d6358";
-    ctx.font = "12px -apple-system, Segoe UI, sans-serif";
+    ctx.fillStyle = soft;
+    ctx.font = `12px ${token("--font") || "sans-serif"}`;
     ctx.textAlign = "center";
-    ctx.fillText("No usage trend for this period yet.", W / 2, H / 2);
+    ctx.fillText("Bu dönem için henüz kullanım verisi yok.", width / 2, height / 2);
     return;
   }
-  const max = Math.max(1, ...values);
-  const bw = (W - pad.l - pad.r) / data.length;
-  const grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
-  grad.addColorStop(0, "#0f312e");
-  grad.addColorStop(1, "#276257");
 
-  values.forEach((value, i) => {
-    const h = (value / max) * (H - pad.t - pad.b);
-    const x = pad.l + i * bw;
-    const y = H - pad.b - h;
-    ctx.fillStyle = grad;
-    const w = Math.max(1, bw - 3);
-    const rr = Math.min(4, w / 2);
-    roundRect(ctx, x + 1.5, y, w, Math.max(h, 1), rr);
+  const pad = { left: 2, right: 2, top: 8, bottom: 18 };
+  const max = Math.max(1, ...values);
+  const barWidth = (width - pad.left - pad.right) / data.length;
+  const gradient = ctx.createLinearGradient(0, pad.top, 0, height - pad.bottom);
+  gradient.addColorStop(0, token("--pine"));
+  gradient.addColorStop(1, token("--teal"));
+
+  // Kullanımı olmayan gün de bir gündür: sıfır değerler 1 piksellik bir iz
+  // bırakır. Hiç çizmemek, tek günlük kullanımı olan bir hesapta grafiği bozuk
+  // gibi gösteriyordu.
+  values.forEach((value, index) => {
+    const scaled = (value / max) * (height - pad.top - pad.bottom);
+    const barHeight = Math.max(scaled, 1);
+    const x = pad.left + index * barWidth;
+    const y = height - pad.bottom - barHeight;
+    ctx.fillStyle = value > 0 ? gradient : token("--line");
+    const w = Math.max(1, barWidth - 3);
+    const r = Math.min(3, w / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + barHeight, r);
+    ctx.arcTo(x + w, y + barHeight, x, y + barHeight, r);
+    ctx.arcTo(x, y + barHeight, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
     ctx.fill();
   });
 
-  ctx.fillStyle = "#5d6358";
+  ctx.fillStyle = soft;
   ctx.textAlign = "left";
-  ctx.font = "10px -apple-system, Segoe UI, sans-serif";
-  const step = Math.ceil(data.length / 6);
-  data.forEach((d, i) => {
-    if (i % step !== 0 && i !== data.length - 1) return;
-    ctx.fillText(String(d.label || ""), pad.l + i * bw, H - 7);
+  ctx.font = `10px ${token("--mono") || "monospace"}`;
+  const step = Math.max(1, Math.ceil(data.length / 6));
+  data.forEach((point, index) => {
+    if (index % step !== 0 && index !== data.length - 1) return;
+    ctx.fillText(String(point.label || ""), pad.left + index * barWidth, height - 5);
   });
 }
 
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+// -------------------------------------------------------------- durum okuma
+
+async function loadTools() {
+  const [tools, claude, codex] = await Promise.all([cizi.listTools(), cizi.getClaudeState(), cizi.getCodexState()]);
+  CLAUDE_STATE = claude?.ok ? (claude.data || CLAUDE_STATE) : { cli: { installed: false }, desktop: { installed: false } };
+  CODEX_STATE = codex?.ok ? (codex.data || CODEX_STATE) : CODEX_STATE;
+  TEMPLATES = { combos: Array.isArray(ME?.combos) ? ME.combos : [] };
+  renderTools(tools.ok ? tools.data : []);
 }
 
-async function loadTemplatesAndTools() {
-  const [toolsRes, claudeRes, codexRes] = await Promise.all([cizi.listTools(), cizi.getClaudeState(), cizi.getCodexState()]);
-  // One call reports both Claude products and whether the pair is connected.
-  CLAUDE_STATE = claudeRes?.ok
-    ? (claudeRes.data || CLAUDE_STATE)
-    : { cli: { installed: false, applied: false }, desktop: { installed: false, applied: false }, connected: false, installedProducts: [] };
-  CLAUDE_CLI_STATUS = CLAUDE_STATE.cli || { installed: false };
-  // One call reports both Codex products and the shared config they read.
-  const codex = codexRes?.ok ? (codexRes.data || {}) : {};
-  CODEX_CLI_STATUS = codex.cli || { installed: false };
-  CODEX_DESKTOP_STATUS = codex.desktop || { installed: false };
-  CODEX_CONFIG_STATE = { ...(codex.config || { applied: false }), path: codex.configPath || null };
-  TEMPLATES = buildDefaultTemplates();
-  renderTools(toolsRes.ok ? toolsRes.data : []);
+// Hangi model ailesinden yapılandırıldığı. Anahtar kimliğinden ayrı tutulur:
+// kural modellerle ilgili, satırlarla değil — iki Claude anahtarı da Claude
+// ailesine bakar.
+function familyFor(switchId) {
+  return switchId === CLAUDE_DESKTOP ? CLAUDE_CODE : switchId;
 }
 
-function buildDefaultTemplates() {
-  const combos = Array.isArray(ME?.combos) ? ME.combos : [];
+// Bir anahtarın tek okuması: hem görünen etiket hem sol kenar şeridi buradan.
+// Niyet anahtarın gösterdiği şey; `applied` karşılaştırıldığı olgu. Aradaki
+// fark saklanmaz, adı konur.
+function switchState({ desiredEnabled, applied, restorable, installed, blocked, blockReason }) {
+  if (blocked) return { key: "attention", label: "Dikkat", note: blockReason || "Bu bağlantı şu an denetlenemiyor." };
+  if (!installed) return { key: "absent", label: "Kurulu değil", note: "Bağlamak için önce ürünü kurun." };
+  if (desiredEnabled && applied) return { key: "on", label: "Bağlı", note: null };
+  if (desiredEnabled && !applied) {
+    return { key: "working", label: "Tamamlanacak", note: "Bağlantı açık tutuluyor; eksik ayarlar otomatik yeniden uygulanacak." };
+  }
+  if (!desiredEnabled && (applied || restorable)) {
+    return { key: "working", label: "Kapatma sürüyor", note: "Orijinal ayarlarınız hâlâ yedekte; geri yükleme tamamlanacak." };
+  }
+  return { key: "off", label: "Kapalı", note: null };
+}
+
+function modelSummary(models, toolId) {
+  const profiles = (models || []).map((model) => capabilityFor(model, toolId));
+  if (!profiles.length) return { text: "uyumlu model yok", title: "Bu araç için uygun model bulunamadı" };
+  const thinking = toolId === CLAUDE_CODE ? "thinking" : "effort";
+  const windows = profiles.map((profile) => profile.contextWindowTokens);
+  const smallest = Math.min(...windows);
+  const largest = Math.max(...windows);
+  const windowLabel = smallest === largest ? contextLabel(largest) : `${contextLabel(smallest)}–${contextLabel(largest)}`;
   return {
-    combos,
-    tools: [{ id: CLAUDE_CODE_CLI_TOOL_ID, enabled: true }, { id: CODEX_CLI_TOOL_ID, enabled: true }],
+    text: `${profiles.length} model · ${windowLabel} · ${thinking}`,
+    title: `${profiles.map((profile) => displayModelName(profile.name)).join(", ")}`
+      + ` — hepsi otomatik eklenir, ${thinking} seviyesi modelin desteklediği aralıktan seçilir`,
   };
 }
 
-function updateClaudeInstallFeedback(state) {
-  CLAUDE_INSTALL_STATE = { ...CLAUDE_INSTALL_STATE, ...(state || {}) };
-  renderCliInstallActivity(CLAUDE_INSTALL_STATE, "claude");
-}
+// ------------------------------------------------------------------ parçalar
 
-function updateCodexInstallFeedback(state) {
-  CODEX_INSTALL_STATE = { ...CODEX_INSTALL_STATE, ...(state || {}) };
-  renderCliInstallActivity(CODEX_INSTALL_STATE, "codex");
-}
-
-function updateCodexDesktopInstallFeedback(state) {
-  CODEX_DESKTOP_INSTALL_STATE = { ...CODEX_DESKTOP_INSTALL_STATE, ...(state || {}) };
-  renderCliInstallActivity(CODEX_DESKTOP_INSTALL_STATE, "codex-desktop");
-}
-
-const INSTALL_ACTIVITY_TARGETS = {
-  claude: { box: "claude-cli-install-activity", name: CLAUDE_CODE_CLI_NAME },
-  "claude-desktop": { box: "claude-desktop-install-activity", name: CLAUDE_DESKTOP_NAME },
-  codex: { box: "codex-cli-install-activity", name: CODEX_CLI_NAME },
-  "codex-desktop": { box: "codex-desktop-install-activity", name: CODEX_DESKTOP_NAME },
-};
-
-// While a Claude Desktop installation is running the button is the part of the
-// row the user watches, so it names the phase the installer is really in rather
-// than claiming "Kuruluyor" for the whole download.
-const CLAUDE_INSTALL_BUTTON_LABELS = {
-  starting: "Hazırlanıyor...",
-  downloading: "İndiriliyor...",
-  "verifying-signature": "İmza doğrulanıyor...",
-  installing: "Kuruluyor...",
-  verifying: "Doğrulanıyor...",
-};
-
-// Claude Desktop reports progress as (phase, message, details) from its own
-// transplanted engine. This maps that onto the activity panel the other tools
-// already use, so every long operation looks the same to the user.
-// The activity panel styles itself from `status`, so the phase has to be mapped
-// onto it rather than flattened to "installing". Reporting the download as
-// "installing" is what left the bar with no measurable step: the panel treats a
-// download percentage and an install percentage differently, and the download —
-// the only phase that has a real percentage — was never labelled as one.
-const CLAUDE_PROGRESS_STATUS = {
-  starting: "checking",
-  downloading: "downloading",
-  "verifying-signature": "verifying",
-  installing: "installing",
-  verifying: "verifying",
-  uninstalling: "installing",
-  configuring: "installing",
-  authenticating: "installing",
-  translating: "installing",
-  restoring: "installing",
-  stopping: "installing",
-  repairing: "installing",
-};
-
-function updateClaudeProgress(progress) {
-  CLAUDE_PROGRESS = progress || { phase: "idle", message: "", details: null };
-  const phase = String(CLAUDE_PROGRESS.phase || "");
-  const percent = CLAUDE_PROGRESS.details && Number.isFinite(Number(CLAUDE_PROGRESS.details.percent))
-    ? Number(CLAUDE_PROGRESS.details.percent)
-    : null;
-  if (CLAUDE_INSTALL_BUTTON && CLAUDE_INSTALL_BUTTON_LABELS[phase]) {
-    // The download is minutes long, so its percentage goes on the button too —
-    // that is the control the user is looking at while they wait.
-    CLAUDE_INSTALL_BUTTON.textContent = phase === "downloading" && percent !== null
-      ? `İndiriliyor %${Math.round(percent)}`
-      : CLAUDE_INSTALL_BUTTON_LABELS[phase];
-  }
-  const active = Boolean(phase) && phase !== "idle" && phase !== "complete" && Boolean(CLAUDE_PROGRESS.message);
-  const failed = phase === "error";
-  renderCliInstallActivity({
-    status: failed ? "error"
-      : phase === "complete" ? "installed"
-        : active ? (CLAUDE_PROGRESS_STATUS[phase] || "installing") : "idle",
-    phase,
-    percent: failed ? null : phase === "complete" ? 100 : percent,
-    message: CLAUDE_PROGRESS.message || "",
-    operations: active || failed || phase === "complete"
-      ? [{
-        id: "claude-desktop",
-        label: claudePhaseLabel(phase),
-        status: failed ? "error" : phase === "complete" ? "done" : "running",
-        percent: failed ? null : phase === "complete" ? 100 : percent,
-        detail: CLAUDE_PROGRESS.message || "",
-      }]
-      : [],
-  }, "claude-desktop");
-}
-
-function claudePhaseLabel(phase) {
-  const labels = {
-    starting: "Kuruluma hazırlanılıyor",
-    downloading: "Claude Desktop indiriliyor",
-    "verifying-signature": "Dijital imza doğrulanıyor",
-    installing: "Claude Desktop kuruluyor",
-    verifying: "Kurulum doğrulanıyor",
-    uninstalling: "Claude Desktop kaldırılıyor",
-    configuring: "Ayarlar uygulanıyor",
-    authenticating: "Kimlik doğrulama hazırlanıyor",
-    translating: "Arayüz paketi kontrol ediliyor",
-    restoring: "Önceki ayarlara dönülüyor",
-    stopping: "Claude Desktop kapatılıyor",
-    repairing: "Ayarlar yenileniyor",
-    complete: "Tamamlandı",
-    error: "İşlem tamamlanamadı",
-  };
-  return labels[phase] || "Claude Desktop işlemi";
-}
-
-function renderCliInstallActivity(state, cli) {
-  const target = INSTALL_ACTIVITY_TARGETS[cli] || INSTALL_ACTIVITY_TARGETS.claude;
-  const cliName = target.name;
-  const box = document.getElementById(target.box);
-  if (!box) return;
-  const operations = Array.isArray(state?.operations) ? state.operations : [];
-  const visible = operations.length > 0 && state?.status !== "idle";
-  box.classList.toggle("hidden", !visible);
-  if (!visible) return;
-
-  box.innerHTML = "";
-  const header = document.createElement("div");
-  header.className = "cli-activity-head";
-  const title = document.createElement("strong");
-  title.textContent = `${cliName} installation activity`;
-  const overall = document.createElement("span");
-  overall.className = "cli-activity-overall";
-  const overallPercent = Number(state?.percent);
-  const hasOverallPercent = state?.percent != null && Number.isFinite(overallPercent) && (overallPercent > 0 || state?.status === "installed");
-  overall.textContent = state?.status === "error"
-    ? "Hata"
-    : hasOverallPercent ? `${Math.round(overallPercent)}%` : "...";
-  const pulse = document.createElement("span");
-  const running = ["installing", "downloading", "verifying", "checking"].includes(state?.status);
-  pulse.className = `cli-activity-pulse ${running ? "" : "hidden"}`;
-  pulse.textContent = "● live";
-  pulse.title = "Installer is still running";
-  header.appendChild(title);
-  header.appendChild(overall);
-  header.appendChild(pulse);
-  box.appendChild(header);
-
-  const message = document.createElement("div");
-  message.className = "cli-activity-message";
-  message.textContent = state?.message || "Working...";
-  box.appendChild(message);
-  const hint = document.createElement("div");
-  hint.className = "cli-activity-hint";
-  if ((state?.status === "installing" || state?.phase === "install") && state?.percent >= 90) {
-    hint.textContent = "Bu aşama 1–2 dk sürebilir — pencereyi kapatmayın, işlem arka planda sürüyor.";
-  } else if (state?.status === "error") {
-    hint.textContent = "";
-  } else if (["installing", "downloading", "verifying"].includes(state?.status)) {
-    hint.textContent = "Arka planda çalışıyor — lütfen bekleyin.";
-  } else {
-    hint.textContent = "";
-  }
-  if (hint.textContent) box.appendChild(hint);
-
-  const rawActive = [...operations].find((o) => o.status === "running") || operations[operations.length - 1];
-  const stepPercent = Number(rawActive?.percent);
-  // A zero emitted by a third-party installer is not download progress.  It is
-  // shown as indeterminate until a measurable byte/step percentage is known.
-  const hasStepPercent = rawActive?.percent != null && Number.isFinite(stepPercent) && (stepPercent > 0 || rawActive?.status === "done");
-  const statusClass = state?.status === "error" ? "cli-operation-error" : state?.status === "installed" ? "cli-operation-done" : "";
-  const stepLabel = rawActive?.label || (state?.phase === "download" ? "Download official installer" : state?.phase === "install" ? "Run official installer" : state?.phase === "verify" ? `Verify ${cliName}` : `${cliName} installation`);
-  const detailText = (rawActive?.detail || state?.message || "Working...").trim();
-
-  const single = document.createElement("div");
-  single.className = `cli-operation ${statusClass}`.trim();
-
-  const stepRow = document.createElement("div");
-  stepRow.className = "cli-step";
-  stepRow.textContent = stepLabel;
-  single.appendChild(stepRow);
-
-  const rowHead = document.createElement("div");
-  rowHead.className = "cli-operation-head";
-  const label = document.createElement("span");
-  label.className = "cli-operation-label";
-  label.textContent = hasStepPercent ? "Step progress" : "Installation status";
-  const percent = document.createElement("span");
-  percent.className = "cli-operation-percent";
-  percent.textContent = hasStepPercent ? `${Math.round(stepPercent)}%` : (state?.status === "error" ? "—" : "...");
-  rowHead.appendChild(label);
-  rowHead.appendChild(percent);
-  single.appendChild(rowHead);
-
-  const track = document.createElement("div");
-  track.className = "cli-operation-track";
-  const fill = document.createElement("span");
-  fill.className = "cli-operation-fill";
-  if (state?.status === "error") {
-    fill.classList.add("cli-operation-fill-error");
-    fill.style.width = "100%";
-  } else if (hasStepPercent) {
-    fill.style.width = `${Math.max(0, Math.min(100, stepPercent))}%`;
-  } else {
-    fill.classList.add("indeterminate");
-  }
-  track.appendChild(fill);
-  single.appendChild(track);
-
-  const detail = document.createElement("div");
-  detail.className = "cli-operation-detail";
-  detail.textContent = detailText;
-  single.appendChild(detail);
-  box.appendChild(single);
-}
-
-function button({ label, className, cliId, cliLabel, title, onClick, long }) {
+function button({ label, className = "ghost tiny-btn", cliId, cliLabel, title, onClick, long }) {
   const element = document.createElement("button");
   element.type = "button";
   element.className = className;
-  element.dataset.cliId = cliId;
+  if (cliId) element.dataset.cliId = cliId;
   element.dataset.cliLabel = cliLabel || label;
   if (title) element.title = title;
   if (long) {
@@ -531,886 +434,986 @@ function button({ label, className, cliId, cliLabel, title, onClick, long }) {
   return element;
 }
 
-// Summarises what will actually be written for this tool, so the row cannot
-// promise a capability the config does not carry.
-function automaticModelSummary(models, toolId) {
-  const profiles = (models || []).map((model) => capabilityFor(model, toolId));
-  const summary = document.createElement("span");
-  summary.className = "tool-model-summary";
-  if (!profiles.length) {
-    summary.textContent = "Uyumlu model yok";
-    summary.title = "Bu araç için uygun model bulunamadı";
-    return summary;
-  }
-  const thinkingLabel = toolId === "claude-code" ? "thinking" : "effort";
-  const smallest = Math.min(...profiles.map((profile) => profile.contextWindowTokens));
-  const largest = Math.max(...profiles.map((profile) => profile.contextWindowTokens));
-  const windowLabel = smallest === largest
-    ? contextLabel(largest)
-    : `${contextLabel(smallest)}-${contextLabel(largest)}`;
-  summary.textContent = `${profiles.length} model · ${windowLabel} · ${thinkingLabel}`;
-  summary.title = `${profiles.map((profile) => profile.name).join(", ")}`
-    + ` — hepsi otomatik eklenir, ${thinkingLabel} seviyesi modelin desteklediği aralıktan seçilir`;
-  return summary;
+let openMenu = null;
+
+function closeMenu() {
+  if (!openMenu) return;
+  openMenu.menu.hidden = true;
+  openMenu.toggle.setAttribute("aria-expanded", "false");
+  openMenu = null;
 }
 
-// The shared-folder note below is a Codex-only concept: its two products read
-// one config file, so a removal has to say whether that file survives. Claude's
-// two products share nothing, and its plan carries no `sharedRemovable` flag —
-// the note is skipped entirely rather than defaulting to the "other Codex
-// product" wording it used to fall through to.
-function describeRemovalPlan(plan, productName) {
-  const removeList = (plan?.remove || []).map((item) => `  • ${item.path}\n    (${item.reason})`).join("\n");
-  const preserveList = (plan?.preserve || []).map((item) => `  • ${item.path}\n    (${item.reason})`).join("\n");
-  const lines = [`${productName} kökten kaldırılacak.`, ""];
-  if (removeList) lines.push("SİLİNECEK:", removeList, "");
-  if (preserveList) lines.push("KORUNACAK:", preserveList, "");
-  if (plan?.sharedRemovable === true) {
-    lines.push("Bu bilgisayarda başka Codex ürünü kalmıyor, bu yüzden ortak Codex klasörü de silinecek.");
-    lines.push("Bu klasörde oturum bilgileri, sohbet geçmişi ve ayarlar bulunur.", "");
-  } else if (plan?.sharedRemovable === false) {
-    lines.push("Diğer Codex ürünü kurulu olduğu için ortak klasöre ve ayar dosyasına dokunulmayacak.", "");
+document.addEventListener("click", (event) => {
+  if (openMenu && !openMenu.root.contains(event.target)) closeMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeMenu();
+});
+// Pencere odağı kaybettiğinde menü KAPANIR.
+//
+// Bunun bedeli yaşanarak öğrenildi: açık bırakılan bir kaldırma menüsü,
+// "Seçilenleri kaldır" düğmesi ekranda duran silahlı bir yıkıcı eylemdir.
+// Kullanıcı başka bir pencereye geçip saatler sonra döndüğünde o düğmenin ne
+// yaptığını hatırlamak zorunda kalmamalı. Yıkıcı bir eylem yalnızca kullanıcının
+// o an baktığı ekranda durabilir.
+window.addEventListener("blur", closeMenu);
+document.addEventListener("visibilitychange", () => { if (document.hidden) closeMenu(); });
+
+// Bölünmüş düğme: ana eylem + açılır ok. Ana düğme CLI köprüsünün bildiği
+// kimliği taşır, böylece "cizi-cli click <id>" davranışı değişmez.
+function splitButton({ main, menuAlign = "left", onOpen }) {
+  const root = document.createElement("div");
+  root.className = "split";
+  const mainButton = button({ ...main, className: `${main.className || "ghost tiny-btn"} split-main` });
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "split-toggle";
+  toggle.textContent = "▾";
+  toggle.setAttribute("aria-haspopup", "true");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.dataset.cliId = `${main.cliId}.more`;
+  toggle.dataset.cliLabel = `${main.cliLabel || main.label} seçenekleri`;
+  toggle.title = "Diğer seçenekler";
+
+  const menu = document.createElement("div");
+  menu.className = `menu${menuAlign === "right" ? " menu-right" : ""}`;
+  menu.hidden = true;
+
+  toggle.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const wasOpen = openMenu?.menu === menu;
+    closeMenu();
+    if (wasOpen) return;
+    menu.innerHTML = '<div class="menu-note">Hazırlanıyor...</div>';
+    menu.hidden = false;
+    menu.classList.remove("menu-up");
+    toggle.setAttribute("aria-expanded", "true");
+    openMenu = { root, menu, toggle };
+    await onOpen(menu);
+    // Alt kenara yakın bir kartta menü pencerenin dışına taşar; o zaman yukarı
+    // doğru açılır. Ölçüm içerik yazıldıktan sonra yapılır, yoksa yükseklik
+    // henüz bilinmez.
+    menu.style.maxHeight = "";
+    const below = menu.getBoundingClientRect();
+    if (below.bottom > window.innerHeight - 8) {
+      menu.classList.add("menu-up");
+      // Yukarı açılan menü de üstten taşabilir; kalan boşluğa sığdırılır ve
+      // gerisi kendi içinde kaydırılır. Aksi halde ilk satır okunamıyor.
+      const above = menu.getBoundingClientRect();
+      if (above.top < 8) menu.style.maxHeight = `${Math.max(140, above.bottom - 12)}px`;
+    }
+  });
+
+  root.append(mainButton, toggle, menu);
+  return { root, mainButton };
+}
+
+function menuItem({ label, hint, cliId, disabled, onClick }) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "menu-item";
+  item.disabled = Boolean(disabled);
+  if (cliId) item.dataset.cliId = cliId;
+  item.dataset.cliLabel = label;
+  const strong = document.createElement("strong");
+  strong.textContent = label;
+  item.appendChild(strong);
+  if (hint) {
+    const span = document.createElement("span");
+    span.textContent = hint;
+    item.appendChild(span);
   }
-  lines.push("Devam edilsin mi?");
+  if (onClick) {
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeMenu();
+      onClick(event);
+    });
+  }
+  return item;
+}
+
+// ----------------------------------------------------- kaldırma menüsü (madde 3)
+//
+// Kategoriler radyo düğmesi gibi davranır ama tik göstermez: seçili olan tam
+// opak, tıklanan SAYDAMLAŞIR ve üstü çizilir — yani silinmeyecek. Kilitli olan
+// baştan saydamdır ve tıklanamaz; sebebi altında yazar.
+const REMOVAL_SELECTION = new Map();
+
+function selectionFor(productId, plan) {
+  if (!REMOVAL_SELECTION.has(productId)) {
+    REMOVAL_SELECTION.set(productId, new Set(
+      plan.categories.filter((category) => category.selectedByDefault).map((category) => category.id),
+    ));
+  }
+  const selection = REMOVAL_SELECTION.get(productId);
+  // Plan yeniden okunduğunda kaybolmuş kategoriler seçimden düşer.
+  const valid = new Set(plan.categories.map((category) => category.id));
+  for (const id of [...selection]) if (!valid.has(id)) selection.delete(id);
+  return selection;
+}
+
+async function buildRemovalMenu(productId, menu, cliPrefix = productId) {
+  const result = await cizi.planProductRemoval(productId);
+  menu.innerHTML = "";
+  if (!result.ok) {
+    menu.innerHTML = `<div class="menu-note">${clientMessage(result.error || "Kaldırma planı alınamadı.")}</div>`;
+    return;
+  }
+  const plan = result.data;
+  if (!plan.categories.length) {
+    menu.innerHTML = '<div class="menu-note">Bu bilgisayarda silinecek bir iz bulunamadı.</div>';
+    return;
+  }
+  const selection = selectionFor(productId, plan);
+
+  const heading = document.createElement("div");
+  heading.className = "menu-note";
+  heading.style.borderTop = "none";
+  heading.style.marginTop = "0";
+  heading.textContent = "Nelerin silineceğini seçin. Tıkladığınız kategori saydamlaşır — o silinmez.";
+  menu.appendChild(heading);
+
+  const total = document.createElement("span");
+  total.className = "cat-size";
+
+  const paintTotal = () => {
+    const bytes = plan.categories
+      .filter((category) => selection.has(category.id))
+      .reduce((sum, category) => sum + (category.bytes || 0), 0);
+    total.textContent = bytes > 0 ? `${formatBytes(bytes)} boşalacak` : "";
+  };
+
+  for (const category of plan.categories) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "cat";
+    row.dataset.cliId = `${cliPrefix}.category.${category.id}`;
+    row.dataset.cliLabel = category.label;
+
+    const name = document.createElement("span");
+    name.className = "cat-name";
+    name.textContent = category.label;
+    const size = document.createElement("span");
+    size.className = "cat-size";
+    const hint = document.createElement("span");
+    hint.className = "cat-hint";
+    row.append(name, size, hint);
+
+    const paint = () => {
+      const on = selection.has(category.id) && !category.locked;
+      row.classList.toggle("off", !on && !category.locked);
+      row.classList.toggle("locked", Boolean(category.locked));
+      size.textContent = category.locked
+        ? "korunur"
+        : `${category.bytesApproximate ? "≈ " : ""}${formatBytes(category.bytes)}`;
+      const count = category.paths.length + category.actions.length;
+      hint.textContent = category.locked
+        ? category.lockReason || "Başka bir ürün bu dosyaları kullanıyor."
+        : `${category.hint} · ${count} öğe`;
+      row.title = category.locked
+        ? category.lockReason || ""
+        : category.paths.map((item) => item.path).concat(category.actions.map((item) => item.label)).join("\n");
+    };
+
+    if (category.locked) {
+      row.disabled = true;
+    } else {
+      row.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (selection.has(category.id)) selection.delete(category.id);
+        else selection.add(category.id);
+        paint();
+        paintTotal();
+      });
+    }
+    paint();
+    menu.appendChild(row);
+  }
+
+  if (plan.protected?.length) {
+    const note = document.createElement("div");
+    note.className = "menu-note";
+    note.textContent = `Korunur: ${plan.protected.map((item) => item.reason).join(" · ")}`;
+    menu.appendChild(note);
+  }
+  // Başka bir paket yöneticisinin (WinGet, kod düzenleyici) sahiplendiği
+  // kurulumlar. Birden fazla olabilir; hepsi ayrı ayrı söylenir.
+  for (const external of plan.external?.all || (plan.external ? [plan.external] : [])) {
+    const note = document.createElement("div");
+    note.className = "menu-note";
+    note.textContent = `${external.label} — Cizi Code buna dokunmaz`
+      + `${external.reason ? ` (${external.reason})` : ""}. Kaldırmak için: ${external.command}`;
+    menu.appendChild(note);
+  }
+
+  const foot = document.createElement("div");
+  foot.className = "menu-foot";
+  foot.appendChild(button({
+    label: "Seçilenleri kaldır",
+    className: "primary tiny-btn",
+    cliId: `${cliPrefix}.remove-selected`,
+    cliLabel: `${NAMES[productId] || productId} seçilenleri kaldır`,
+    long: true,
+    onClick: () => {
+      closeMenu();
+      runRemoval(productId, [...selection]);
+    },
+  }));
+  paintTotal();
+  foot.appendChild(total);
+  menu.appendChild(foot);
+}
+
+function removalConfirmText(productName, plan, selectedIds) {
+  const chosen = plan.categories.filter((category) => selectedIds.includes(category.id) && !category.locked);
+  const skipped = plan.categories.filter((category) => !selectedIds.includes(category.id) && !category.locked);
+  const total = chosen.reduce((sum, category) => sum + (category.bytes || 0), 0);
+  const removesApplication = chosen.some((category) => category.id === "app");
+  // Onay metni ilk satırda en ağır sonucu söyler: uygulamanın kendisi gidiyor mu
+  // ve ne kadar veri siliniyor. Yalnızca kategori adlarını listelemek, "hepsi
+  // seçili" durumunda ne kadar büyük bir işlem olduğunu görünmez bırakıyor.
+  const lines = [
+    removesApplication
+      ? `${productName} BİLGİSAYARINIZDAN KALDIRILACAK.`
+      : `${productName} verilerinin bir kısmı silinecek.`,
+    total > 0 ? `Silinecek veri: ${formatBytes(total)}` : "",
+    "",
+  ].filter((line, index) => line !== "" || index === 2);
+  if (chosen.length) {
+    lines.push("SİLİNECEK:");
+    for (const category of chosen) {
+      lines.push(`  • ${category.label}${category.bytes ? ` (${formatBytes(category.bytes)})` : ""}`);
+    }
+    lines.push("");
+  } else {
+    lines.push("Hiçbir kategori seçilmedi.", "");
+    return lines.join("\n");
+  }
+  if (skipped.length) {
+    lines.push("KORUNACAK (siz seçmediniz):", ...skipped.map((category) => `  • ${category.label}`), "");
+  }
+  const locked = plan.categories.filter((category) => category.locked);
+  if (locked.length) {
+    lines.push("KORUNACAK (başka ürün kullanıyor):", ...locked.map((category) => `  • ${category.label}`), "");
+  }
+  for (const external of plan.external?.all || (plan.external ? [plan.external] : [])) {
+    lines.push(`DOKUNULMAZ — ${external.label}`, `  kaldırmak için: ${external.command}`, "");
+  }
+  lines.push(removesApplication
+    ? "Bu işlem GERİ ALINAMAZ. Sohbet geçmişiniz ve uygulama verisi kurtarılamaz.\n\nDevam edilsin mi?"
+    : "Bu işlem geri alınamaz. Devam edilsin mi?");
   return lines.join("\n");
 }
 
-// One product line inside the Codex row: install when missing, open/remove when
-// present. Both products use the same shape so the two stay comparable.
-function codexProductBlock({ name, idPrefix, status, detail, installLabel, onInstall, onOpen, onRemove, onSite, siteLabel, feedback }) {
-  const block = document.createElement("div");
-  block.className = "codex-product";
+async function runRemoval(productId, categories) {
+  const name = NAMES[productId] || productId;
+  const planResult = await cizi.planProductRemoval(productId);
+  if (!planResult.ok) {
+    toast(clientMessage(planResult.error || "Kaldırma planı alınamadı."), "bad");
+    return;
+  }
+  const plan = planResult.data;
+  if (!plan.categories.length) {
+    toast(`${name} için silinecek bir iz bulunamadı.`, "warn");
+    return;
+  }
+  const selected = Array.isArray(categories) && categories.length
+    ? categories
+    : plan.categories.filter((category) => category.selectedByDefault).map((category) => category.id);
+  if (!selected.length) {
+    toast("Hiçbir kategori seçilmedi.", "warn");
+    return;
+  }
+  if (!confirm(removalConfirmText(name, plan, selected))) return;
 
-  const head = document.createElement("div");
-  head.className = "codex-product-info";
-  const title = document.createElement("div");
-  title.className = "codex-product-name";
-  title.textContent = name;
-  const sub = document.createElement("div");
-  sub.className = "tool-sub";
-  sub.textContent = detail;
-  head.appendChild(title);
-  head.appendChild(sub);
+  setProgress(productId, { label: `${name} kaldırılıyor`, percent: null, message: "Başlatılıyor...", done: false, failed: false });
+  clog("info", `${name} kaldırılıyor`, { categories: selected });
+  const result = await cizi.removeProduct(productId, selected);
+  if (!result.ok) {
+    setProgress(productId, { label: `${name} kaldırılamadı`, message: clientMessage(result.error), failed: true, done: true });
+    toast(clientMessage(result.error || "Kaldırma tamamlanamadı."), "bad");
+    return;
+  }
+  const data = result.data || {};
+  const remaining = (data.stillExists || []).length;
+  setProgress(productId, {
+    label: `${name} kaldırıldı`,
+    percent: 100,
+    message: remaining ? `${remaining} öğe silinemedi.` : `${data.removed?.length || 0} öğe silindi.`,
+    done: true,
+  });
+  toast(remaining
+    ? `${name} kısmen kaldırıldı; ${remaining} öğe silinemedi.`
+    : `${name} kaldırıldı.`, remaining ? "warn" : "good");
+  await loadTools();
+}
 
-  const actions = document.createElement("div");
-  actions.className = "tool-actions-buttons";
+// --------------------------------------------------------------- kurulum
 
-  if (status.installed) {
-    actions.appendChild(button({
-      label: "Aç", className: "ghost tiny-btn", cliId: `${idPrefix}.open`, cliLabel: `${name} aç`, onClick: onOpen,
-    }));
-    actions.appendChild(button({
-      label: "Kökten Kaldır", className: "ghost tiny-btn danger", cliId: `${idPrefix}.purge`,
-      cliLabel: `${name} kökten kaldır`, onClick: onRemove,
-    }));
-  } else {
-    actions.appendChild(button({
-      label: installLabel, className: "primary tiny-btn", cliId: `${idPrefix}.install`,
-      cliLabel: `${name} kur`, long: true, onClick: onInstall,
-    }));
-    actions.appendChild(button({
-      label: siteLabel, className: "ghost tiny-btn", cliId: `${idPrefix}.official-site`,
-      cliLabel: `${name} resmî sayfası`, onClick: onSite,
-    }));
+async function runInstall({ scope, name, call }) {
+  setProgress(scope, { label: `${name} kuruluyor`, percent: null, message: "Resmî yükleyici hazırlanıyor...", done: false, failed: false });
+  clog("info", `${name} kurulumu başlatıldı`, { scope });
+  let result;
+  try { result = await call(); } catch (error) { result = { ok: false, error: error?.message }; }
+  if (result?.ok) {
+    setProgress(scope, { label: `${name} kuruldu`, percent: 100, message: "", done: true });
+    toast(`${name} kuruldu.`, "good");
+    await loadTools();
+    return;
+  }
+  const message = clientMessage(result?.error || `${name} kurulamadı.`);
+  setProgress(scope, { label: `${name} kurulamadı`, message, failed: true, done: true });
+  toast(message, "bad");
+}
+
+async function runDownloadOnly({ scope, name, call }) {
+  setProgress(scope, { label: `${name} yükleyicisi indiriliyor`, percent: null, message: "", done: false, failed: false });
+  let result;
+  try { result = await call(); } catch (error) { result = { ok: false, error: error?.message }; }
+  if (!result?.ok) {
+    const message = clientMessage(result?.error || "Yükleyici indirilemedi.");
+    setProgress(scope, { label: "İndirme tamamlanamadı", message, failed: true, done: true });
+    toast(message, "bad");
+    return;
+  }
+  const data = result.data || {};
+  setProgress(scope, { label: "Yükleyici indirildi", percent: 100, message: data.path || "", done: true });
+  toast(`Yükleyici indirildi. ${data.runHint || ""}`.trim(), "good");
+  if (data.path) await cizi.revealPath(data.path);
+}
+
+// ------------------------------------------------------------- anahtar akışı
+//
+// Claude Desktop açıksa ana süreç bunu hata değil SORU olarak bildiriyor; bir
+// kez onay isteyip tekrar denemek, anahtarın ölü görünmesini engelleyen şey.
+async function toggleSwitch(checkbox, { switchId, models }) {
+  const turningOn = checkbox.checked;
+  const name = NAMES[switchId] || switchId;
+  checkbox.disabled = true;
+
+  if (turningOn && !modelNames(models).length) {
+    toast("Bu anahtar için uygun model bulunamadı.", "bad");
+    checkbox.checked = false;
+    checkbox.disabled = false;
+    return;
   }
 
-  block.appendChild(head);
-  block.appendChild(actions);
-  void feedback;
-  return block;
-}
+  const attempt = (closeRunning) => (turningOn
+    ? cizi.applyTool(switchId, closeRunning)
+    : cizi.revertTool(switchId, closeRunning));
 
-// The Claude row. Unlike Codex, the two Claude products share no config file:
-// the CLI is configured through ~/.claude/settings.json and the desktop app
-// through its own managed surface. The single switch is honest about that — it
-// connects both as one unit, and the main process rolls the first back if the
-// second refuses.
-function renderClaudeRow(st, models) {
-  const row = document.createElement("div");
-  row.className = "tool-row codex-row";
-
-  const cli = CLAUDE_STATE.cli || { installed: false };
-  const desktop = CLAUDE_STATE.desktop || { installed: false };
-  const anyInstalled = Boolean(cli.installed || desktop.installed);
-  const connected = CLAUDE_STATE.connected === true;
-  const desiredEnabled = CLAUDE_STATE.desiredEnabled == null ? connected : CLAUDE_STATE.desiredEnabled === true;
-
-  const info = document.createElement("div");
-  info.className = "tool-info";
-  const name = document.createElement("div");
-  name.className = "tool-name";
-  name.textContent = "Claude (Code CLI + Desktop)";
-  const sub = document.createElement("div");
-  sub.className = "tool-sub";
-  sub.textContent = desiredEnabled && !connected
-    ? "Bağlantı açık tutuluyor; eksik Claude ayarları otomatik yeniden uygulanacak"
-    : CLAUDE_STATE.blockReason
-    ? CLAUDE_STATE.blockReason
-    : connected
-      ? "Bağlı — tek anahtar kurulu olan Claude ürünlerini birlikte yönetiyor"
-      : CLAUDE_STATE.partial
-        ? "Yarım bağlantı algılandı — anahtarı kapatıp yeniden açın"
-        : anyInstalled
-          ? "Tek anahtar Claude Code CLI ve Claude Desktop'ı birlikte Cizi Code'a bağlar"
-          : "Bağlamak için önce en az bir Claude ürünü kurun";
-  info.appendChild(name);
-  info.appendChild(sub);
-
-  const actions = document.createElement("div");
-  actions.className = "tool-actions";
-
-  actions.appendChild(automaticModelSummary(models, "claude-code"));
-
-  const sw = document.createElement("label");
-  sw.className = "switch";
-  const cb = document.createElement("input");
-  cb.type = "checkbox";
-  cb.dataset.cliId = "tool.claude.switch";
-  cb.dataset.cliLabel = "Claude bağlantısı";
-  cb.dataset.cliAwait = "long";
-  cb.dataset.cliAwaitTimeout = String(10 * 60 * 1000);
-  cb.checked = desiredEnabled;
-  cb.disabled = !anyInstalled || CLAUDE_STATE.canConnect === false;
-  if (!anyInstalled) sw.title = "Önce Claude Code CLI veya Claude Desktop kurun";
-  const slider = document.createElement("span");
-  slider.className = "slider";
-  sw.appendChild(cb);
-  sw.appendChild(slider);
-  actions.appendChild(sw);
-
-  cb.addEventListener("change", async () => {
-    cb.disabled = true;
-    const turningOn = cb.checked;
-    clog("info", `Claude: ${turningOn ? "bağlanıyor" : "geri alınıyor"}`, { tool: st.id });
-    // Claude Desktop reads its managed configuration once at startup, so it has
-    // to be closed for the switch to change anything — and it opens itself right
-    // after being installed, which is exactly when the switch is first used.
-    // The main process reports that as a question rather than a failure; asking
-    // and retrying once is what makes the switch work instead of appearing dead.
-    const runWithRestartPrompt = async (attempt) => {
-      let result = await attempt(false);
-      if (!result.ok && result.code === "PROCESS_RUNNING_CONFIRMATION_REQUIRED") {
-        const proceed = confirm(turningOn
-          ? "Claude Desktop şu an açık.\n\nAyarların uygulanabilmesi için kapatılması gerekiyor. Kapatılsın mı?"
-          : "Claude Desktop şu an açık.\n\nÖnceki ayarlarınızın geri yüklenebilmesi için kapatılması gerekiyor. Kapatılsın mı?");
-        if (!proceed) return { ok: false, cancelled: true };
-        result = await attempt(true);
-      }
-      return result;
-    };
-
-    let res;
-    if (turningOn) {
-      if (!modelNames(models).length) {
-        toast("Bu anahtar için model bulunamadı.", "bad");
-        cb.checked = false;
-        cb.disabled = false;
-        return;
-      }
-      res = await runWithRestartPrompt((closeRunning) =>
-        cizi.connectClaude(closeRunning));
-      if (res.ok) {
-        updateClaudeProgress({ phase: "complete", message: "Claude bağlantısı doğrulandı.", details: null });
-        const products = res.data?.connectedProducts || [];
-        const count = res.data?.modelCount || modelNames(models).length;
-        toast(products.includes("desktop")
-          ? `Claude bağlandı; ${count} model eklendi. Claude Desktop yeni ayarlarla açıldı.`
-          : `Claude Code CLI bağlandı; ${count} model eklendi.`, "good");
-      } else {
-        updateClaudeProgress({ phase: "error", message: res.error || "Claude bağlanamadı.", details: null });
-        if (!res.cancelled) toast(clientMessage(res.error || "Claude bağlanamadı."), "bad");
-        cb.checked = false;
-      }
-    } else {
-      res = await runWithRestartPrompt((closeRunning) => cizi.disconnectClaude(closeRunning));
-      updateClaudeProgress(res.ok
-        ? { phase: "complete", message: "Claude ayarları geri yüklendi.", details: null }
-        : { phase: "error", message: res.error || "Claude ayarları geri yüklenemedi.", details: null });
-      if (res.ok) toast("Claude bağlantısı kaldırıldı; önceki ayarlarınız geri yüklendi.", "good");
-      else {
-        if (!res.cancelled) toast(clientMessage(res.error || "Claude bağlantısı geri alınamadı."), "bad");
-        cb.checked = true;
-      }
+  clog("info", `${name}: ${turningOn ? "bağlanıyor" : "geri alınıyor"}`, { tool: switchId });
+  let result = await attempt(false);
+  if (!result.ok && result.code === "PROCESS_RUNNING_CONFIRMATION_REQUIRED") {
+    const proceed = confirm(turningOn
+      ? "Claude Desktop şu an açık.\n\nAyarların uygulanabilmesi için kapatılması gerekiyor. Kapatılsın mı?"
+      : "Claude Desktop şu an açık.\n\nÖnceki ayarlarınızın geri yüklenebilmesi için kapatılması gerekiyor. Kapatılsın mı?");
+    if (proceed) result = await attempt(true);
+    else {
+      clearProgress(switchId);
+      checkbox.checked = !turningOn;
+      checkbox.disabled = false;
+      return;
     }
-    cb.disabled = false;
-    await loadTemplatesAndTools();
-    loadLogs();
-  });
+  }
 
-  row.appendChild(info);
-  row.appendChild(actions);
-
-  const products = document.createElement("div");
-  products.className = "codex-products";
-
-  products.appendChild(codexProductBlock({
-    name: CLAUDE_CODE_CLI_NAME,
-    idPrefix: "claude-code-cli",
-    status: cli,
-    detail: cli.installed
-      ? `Kurulu · ${cli.version || cli.command}`
-      : "Kurulu değil · resmî yükleyiciyle kurulur",
-    installLabel: "İndir ve Kur",
-    siteLabel: "Resmî site",
-    onInstall: async (event) => {
-      const target = event.currentTarget;
-      target.disabled = true;
-      target.textContent = "Kuruluyor...";
-      updateClaudeInstallFeedback({ status: "starting", percent: 0, message: "Resmî Claude Code yükleyicisi başlatılıyor...", operations: [] });
-      let res;
-      try { res = await cizi.installClaudeCode(); } catch (error) { res = { ok: false, error: error?.message || "Claude Code CLI kurulamadı." }; }
-      if (res.ok && res.data?.installed) {
-        updateClaudeInstallFeedback({ status: "installed", percent: 100, message: "Claude Code CLI kuruldu." });
-        toast("Claude Code CLI kuruldu.", "good");
-        await loadTemplatesAndTools();
-        setTimeout(() => updateClaudeInstallFeedback({ status: "idle", percent: 0, message: "", operations: [] }), 2500);
-      } else {
-        target.disabled = false;
-        target.textContent = "İndir ve Kur";
-        updateClaudeInstallFeedback({ status: "error", message: res.error || "Claude Code CLI kurulamadı." });
-        toast(clientMessage(res.error || "Claude Code CLI kurulamadı."), "bad");
-      }
-    },
-    onSite: async () => {
-      const res = await cizi.openClaudeCodeSite();
-      if (!res.ok) toast(clientMessage(res.error || "Resmî site açılamadı."), "bad");
-    },
-    onOpen: async (event) => {
-      const target = event.currentTarget;
-      target.disabled = true;
-      const res = await cizi.openClaudeCodeCli();
-      target.disabled = false;
-      if (res.ok) toast("Claude Code CLI başlatıldı.", "good");
-      else toast(clientMessage(res.error || "Claude Code CLI başlatılamadı."), "bad");
-    },
-    onRemove: async (event) => {
-      const target = event.currentTarget;
-      if (!confirm("Claude Code CLI kökten kaldırılacak. Claude Desktop korunur. Devam edilsin mi?")) return;
-      target.disabled = true;
-      target.textContent = "Kaldırılıyor...";
-      clog("info", "Claude Code CLI kökten kaldırılıyor");
-      const res = await cizi.uninstallClaudeCode();
-      if (res.ok && !(res.data?.stillExists || []).length) {
-        toast("Claude Code CLI kaldırıldı.", "good");
-        clog("success", "Claude Code CLI kökten kaldırıldı");
-      } else {
-        toast(clientMessage(res.error || "Kaldırma kısmen tamamlandı."), "bad");
-        clog("warning", "Claude Code CLI kaldırma kısmen tamamlandı");
-      }
-      await loadTemplatesAndTools();
-    },
-  }));
-
-  products.appendChild(claudeDesktopBlock(desktop, connected));
-  row.appendChild(products);
-  return row;
+  checkbox.disabled = false;
+  if (result.ok) {
+    const count = result.data?.modelCount || modelNames(models).length;
+    toast(turningOn ? `${name} bağlandı; ${count} model eklendi.` : `${name} bağlantısı kaldırıldı; önceki ayarlarınız geri yüklendi.`, "good");
+  } else {
+    toast(clientMessage(result.error || `${name} ayarlanamadı.`), "bad");
+    if (turningOn) checkbox.checked = false;
+  }
+  await loadTools();
 }
 
-// Claude Desktop needs a repair action the other products do not: a Claude
-// update replaces the managed configuration, and the transplanted engine
-// re-applies it in one transaction.
-function claudeDesktopBlock(desktop, connected) {
-  const block = document.createElement("div");
-  block.className = "codex-product";
+// ------------------------------------------------------------------- kartlar
+
+function card({ switchId, title, state, fact, models, family, actions, extra }) {
+  const root = document.createElement("div");
+  root.className = `card state-${state.key}`;
 
   const head = document.createElement("div");
-  head.className = "codex-product-info";
-  const title = document.createElement("div");
-  title.className = "codex-product-name";
-  title.textContent = CLAUDE_DESKTOP_NAME;
-  const sub = document.createElement("div");
-  sub.className = "tool-sub";
-  sub.textContent = !desktop.installed
-    ? "Kurulu değil · resmî Claude paketiyle kurulur"
-    : desktop.needsRefresh
-      ? `Kurulu · sürüm ${desktop.version || "bilinmiyor"} · ayarlar yenilenmeli`
-      : desktop.running
-        ? `Kurulu · sürüm ${desktop.version || "bilinmiyor"} · şu an açık`
-        : `Kurulu · sürüm ${desktop.version || "bilinmiyor"}`;
-  head.appendChild(title);
-  head.appendChild(sub);
+  head.className = "card-head";
+  const titleBox = document.createElement("div");
+  titleBox.className = "card-title";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const pill = document.createElement("span");
+  pill.className = `pill pill-${state.key}`;
+  pill.textContent = state.label;
+  if (state.note) pill.title = state.note;
+  titleBox.append(heading, pill);
+
+  const right = document.createElement("div");
+  right.className = "card-head-right";
+  const summary = modelSummary(models, family);
+  const summaryElement = document.createElement("span");
+  summaryElement.className = "card-models";
+  summaryElement.textContent = summary.text;
+  summaryElement.title = summary.title;
+  right.appendChild(summaryElement);
+
+  const switchLabel = document.createElement("label");
+  switchLabel.className = "switch";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.dataset.cliId = `tool.${switchId}.switch`;
+  checkbox.dataset.cliLabel = `${title} bağlantısı`;
+  checkbox.dataset.cliAwait = "long";
+  checkbox.dataset.cliAwaitTimeout = String(10 * 60 * 1000);
+  checkbox.checked = state.desiredEnabled === true;
+  checkbox.disabled = state.switchDisabled === true;
+  if (state.switchTitle) switchLabel.title = state.switchTitle;
+  const slider = document.createElement("span");
+  slider.className = "slider";
+  switchLabel.append(checkbox, slider);
+  checkbox.addEventListener("change", () => toggleSwitch(checkbox, { switchId, models }));
+  right.appendChild(switchLabel);
+
+  head.append(titleBox, right);
+  root.appendChild(head);
+
+  const factElement = document.createElement("p");
+  factElement.className = "card-fact";
+  factElement.textContent = state.note || fact;
+  root.appendChild(factElement);
+
+  if (actions?.childNodes.length) root.appendChild(actions);
+  root.appendChild(laneElement(switchId));
+  if (extra) root.appendChild(extra);
+  return root;
+}
+
+// Kurulu olmayan ürün için: [İndir ve Kur ▾] + [Resmî site]
+// Açılır listede tek bir şey var — "sadece indir, manuel kurulum".
+function installActions({ productId, name, install, downloadOnly, site, siteLabel = "Resmî site", downloadHint }) {
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const { root } = splitButton({
+    main: {
+      label: "İndir ve Kur",
+      className: "primary tiny-btn",
+      cliId: `${productId}.install`,
+      cliLabel: `${name} kur`,
+      long: true,
+      onClick: install,
+    },
+    onOpen: (menu) => {
+      menu.innerHTML = "";
+      menu.appendChild(menuItem({
+        label: "Sadece indir (manuel kurulum)",
+        hint: downloadHint || "Yükleyici indirilenler klasörüne konur, çalıştırılmaz.",
+        cliId: `${productId}.download-only`,
+        disabled: !downloadOnly,
+        onClick: downloadOnly || (() => {}),
+      }));
+      if (!downloadOnly) {
+        const note = document.createElement("div");
+        note.className = "menu-note";
+        note.textContent = "Bu ürün Microsoft Store üzerinden kurulur; indirilebilir bir dosyası yok.";
+        menu.appendChild(note);
+      }
+      return Promise.resolve();
+    },
+  });
+  actions.appendChild(root);
+  actions.appendChild(button({
+    label: siteLabel, cliId: `${productId}.official-site`, cliLabel: `${name} resmî sayfası`, onClick: site,
+  }));
+  return actions;
+}
+
+// Kurulu ürün için kaldırma: [Kökten Kaldır ▾]
+// Ana düğme varsayılan kategorilerle kaldırır (CLI davranışı korunur), ok
+// kategori listesini açar.
+// `cliPrefix` ürün kimliğinden ayrı tutulur: Claude Code CLI'nin arka uçtaki
+// kimliği "claude-code" (anahtarla aynı), ama CLI köprüsünün belgelenmiş düğme
+// kimliği "claude-code-cli.purge". Kimlikleri eşitlemek dışarıdaki sözleşmeyi
+// bozardı.
+function removeSplit(productId, cliPrefix = productId) {
+  const name = NAMES[productId] || productId;
+  const { root } = splitButton({
+    main: {
+      label: "Kökten Kaldır",
+      className: "ghost tiny-btn danger",
+      cliId: `${cliPrefix}.purge`,
+      cliLabel: `${name} kökten kaldır`,
+      long: true,
+      onClick: () => runRemoval(productId, null),
+    },
+    menuAlign: "right",
+    onOpen: (menu) => buildRemovalMenu(productId, menu, cliPrefix),
+  });
+  return root;
+}
+
+// Düzenleyici kimlikleri klasör adlarından gelir (`.vscode` → "vscode"); ekranda
+// ürünün kendi adı yazmalı.
+const EDITOR_NAMES = {
+  vscode: "VS Code",
+  "vscode-insiders": "VS Code Insiders",
+  "vscode-oss": "VSCodium",
+  "vscode-server": "VS Code (uzak)",
+  "vscode-portable": "VS Code (taşınabilir)",
+  cursor: "Cursor",
+  "cursor-server": "Cursor (uzak)",
+  windsurf: "Windsurf",
+  trae: "Trae",
+};
+
+function editorName(key) {
+  return EDITOR_NAMES[String(key || "").toLowerCase()] || String(key || "düzenleyici");
+}
+
+function editorNames(items) {
+  return [...new Set((items || []).map((item) => editorName(item.editor || item)))].join(", ");
+}
+
+function claudeCodeFact(cli) {
+  const editors = (cli.editorExtensions || []);
+  const hasStandalone = cli.installed === true;
+  if (!hasStandalone && editors.length) {
+    return `Bağımsız CLI kurulu değil · ${editorName(editors[0]?.editor) || "VS Code"} eklentisinde Claude Code var (${editors[0]?.version || "bilinmiyor"}) — anahtar açıldığında eklenti de Cizi Code'a bağlanır · resmî yükleyiciyle bağımsız kurulum ekleyebilirsiniz`;
+  }
+  if (!hasStandalone) return "Kurulu değil · resmî yükleyiciyle kurulur";
+  const where = `Kurulu · ${cli.version || cli.command}`;
+  if (editors.length) return `${where} · ayrıca ${editorNames(editors)} eklentisi var — aynı ayar dosyası ikisini de yapılandırır`;
+  return where;
+}
+
+function claudeCodeCard(status, models) {
+  const cli = CLAUDE_STATE.cli || { installed: false };
+  const hasStandalone = cli.installed === true;
+  const hasEditorExtension = (cli.editorExtensions || []).length > 0;
+  const canToggle = hasStandalone || hasEditorExtension;
+  const desiredEnabled = status.desiredEnabled == null ? status.applied === true : status.desiredEnabled === true;
+  const state = {
+    ...switchState({
+      desiredEnabled,
+      applied: status.applied === true,
+      restorable: status.restorable === true,
+      installed: canToggle,
+      blocked: false,
+    }),
+    desiredEnabled,
+    switchDisabled: !canToggle,
+    switchTitle: canToggle ? null : "Önce Claude Code CLI kurun",
+  };
 
   const actions = document.createElement("div");
-  actions.className = "tool-actions-buttons";
-
-  if (!desktop.installed) {
+  actions.className = "actions";
+  if (hasStandalone) {
     actions.appendChild(button({
-      label: "İndir ve Kur", className: "primary tiny-btn", cliId: "claude-desktop.install",
-      cliLabel: "Claude Desktop kur", long: true,
+      label: "Aç", cliId: "claude-code-cli.open", cliLabel: "Claude Code CLI aç",
       onClick: async (event) => {
-        const target = event.currentTarget;
-        target.disabled = true;
-        // The package is a quarter of a gigabyte: most of the wait is the
-        // download, so the button must not claim it is already installing.
-        CLAUDE_INSTALL_BUTTON = target;
-        target.textContent = "Hazırlanıyor...";
-        updateClaudeProgress({ phase: "starting", message: "Claude Desktop kurulumu başlatılıyor...", details: null });
-        let res;
-        try { res = await cizi.installClaudeDesktop(); } catch (error) { res = { ok: false, error: error?.message || "Claude Desktop kurulamadı." }; }
-        CLAUDE_INSTALL_BUTTON = null;
-        if (res.ok) {
-          updateClaudeProgress({ phase: "complete", message: "Claude Desktop kuruldu.", details: null });
-          toast("Claude Desktop kuruldu.", "good");
-          clog("success", "Claude Desktop kuruldu");
-          await loadTemplatesAndTools();
-          setTimeout(() => updateClaudeProgress({ phase: "idle", message: "", details: null }), 2500);
-        } else {
-          target.disabled = false;
-          target.textContent = "İndir ve Kur";
-          updateClaudeProgress({ phase: "error", message: res.error || "Claude Desktop kurulamadı.", details: null });
-          toast(clientMessage(res.error || "Claude Desktop kurulamadı."), "bad");
-        }
+        event.currentTarget.disabled = true;
+        const result = await cizi.openClaudeCodeCli();
+        event.currentTarget.disabled = false;
+        toast(result.ok ? "Claude Code CLI başlatıldı." : clientMessage(result.error), result.ok ? "good" : "bad");
       },
     }));
-    actions.appendChild(button({
-      label: "Resmî site", className: "ghost tiny-btn", cliId: "claude-desktop.official-site",
-      cliLabel: "Claude Desktop resmî sayfası",
-      onClick: async () => {
-        const res = await cizi.openExternal("https://claude.ai/download");
-        if (!res.ok) toast(clientMessage(res.error || "Resmî site açılamadı."), "bad");
+    actions.appendChild(removeSplit(CLAUDE_CODE, "claude-code-cli"));
+  }
+  if (!hasStandalone) {
+    actions.append(...installActions({
+      productId: "claude-code-cli",
+      name: NAMES[CLAUDE_CODE],
+      install: () => runInstall({ scope: CLAUDE_CODE, name: NAMES[CLAUDE_CODE], call: () => cizi.installClaudeCode() }),
+      downloadOnly: () => runDownloadOnly({ scope: CLAUDE_CODE, name: NAMES[CLAUDE_CODE], call: () => cizi.downloadClaudeCode() }),
+      site: async () => {
+        const result = await cizi.openClaudeCodeSite();
+        if (!result.ok) toast(clientMessage(result.error), "bad");
       },
-    }));
+    }).childNodes);
+  }
+
+  return card({
+    switchId: CLAUDE_CODE,
+    title: NAMES[CLAUDE_CODE],
+    state,
+    fact: claudeCodeFact(cli),
+    models,
+    family: CLAUDE_CODE,
+    actions,
+  });
+}
+
+function claudeDesktopCard(status, models) {
+  const desktop = CLAUDE_STATE.desktop || { installed: false };
+  const desiredEnabled = status.desiredEnabled == null ? status.applied === true : status.desiredEnabled === true;
+  const blocked = status.blocked === true || desktop.blocked === true;
+  const state = {
+    ...switchState({
+      desiredEnabled,
+      applied: status.applied === true,
+      restorable: status.restorable === true,
+      installed: desktop.installed === true,
+      blocked,
+      blockReason: status.blockReason || desktop.blockReason,
+    }),
+    desiredEnabled,
+    switchDisabled: !desktop.installed || blocked,
+    switchTitle: desktop.installed ? null : "Önce Claude Desktop kurun",
+  };
+
+  const version = desktop.version || "bilinmiyor";
+  const fact = !desktop.installed
+    ? "Kurulu değil · resmî Claude paketiyle kurulur"
+    : desktop.needsRefresh ? `Kurulu · sürüm ${version} · ayarlar yenilenmeli`
+      : desktop.running ? `Kurulu · sürüm ${version} · şu an açık`
+        : `Kurulu · sürüm ${version}`;
+  // Claude Desktop'ın içindeki Claude Code sekmesi CLI ile aynı çekirdeği ve
+  // aynı ~/.claude/settings.json'u okuyor. İki anahtarın yazdığı yerler ayrı ama
+  // burada buluşuyorlar; kullanıcı bunu ekranda görmeli.
+  const embedded = status.applied === true && CLAUDE_STATE.cli?.applied !== true
+    ? " · içindeki Claude Code sekmesi için CLI anahtarını da açın"
+    : "";
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  if (!desktop.installed) {
+    actions.append(...installActions({
+      productId: CLAUDE_DESKTOP,
+      name: NAMES[CLAUDE_DESKTOP],
+      install: () => runInstall({ scope: CLAUDE_DESKTOP, name: NAMES[CLAUDE_DESKTOP], call: () => cizi.installClaudeDesktop() }),
+      downloadOnly: () => runDownloadOnly({ scope: CLAUDE_DESKTOP, name: NAMES[CLAUDE_DESKTOP], call: () => cizi.downloadClaudeDesktop() }),
+      downloadHint: "Paket imzası doğrulanır, indirilenler klasörüne konur; kurulumu siz başlatırsınız.",
+      site: async () => {
+        const result = await cizi.openExternal("https://claude.ai/download");
+        if (!result.ok) toast(clientMessage(result.error), "bad");
+      },
+    }).childNodes);
   } else {
     actions.appendChild(button({
-      label: "Aç", className: "ghost tiny-btn", cliId: "claude-desktop.open", cliLabel: "Claude Desktop aç",
+      label: "Aç", cliId: "claude-desktop.open", cliLabel: "Claude Desktop aç",
       onClick: async (event) => {
-        const target = event.currentTarget;
-        target.disabled = true;
-        const res = await cizi.launchClaudeDesktop();
-        target.disabled = false;
-        if (res.ok) toast("Claude Desktop açıldı.", "good");
-        else toast(clientMessage(res.error || "Claude Desktop açılamadı."), "bad");
+        event.currentTarget.disabled = true;
+        const result = await cizi.launchClaudeDesktop();
+        event.currentTarget.disabled = false;
+        toast(result.ok ? "Claude Desktop açıldı." : clientMessage(result.error), result.ok ? "good" : "bad");
       },
     }));
-    if (connected || desktop.needsRefresh) {
+    if (status.applied || desktop.needsRefresh) {
       actions.appendChild(button({
-        label: "Onar", className: "ghost tiny-btn", cliId: "claude-desktop.repair", cliLabel: "Claude Desktop onar",
-        long: true, title: "Claude güncellemesinden sonra Cizi Code ayarlarını yeniden uygular",
+        label: "Onar", cliId: "claude-desktop.repair", cliLabel: "Claude Desktop onar", long: true,
+        title: "Claude güncellemesinden sonra Cizi Code ayarlarını ve Türkçe arayüz çevirisini yeniden uygular",
         onClick: async (event) => {
           const target = event.currentTarget;
           target.disabled = true;
-          target.textContent = "Onarılıyor...";
-          const res = await cizi.repairClaudeDesktop();
+          setProgress(CLAUDE_DESKTOP, { label: "Ayarlar yenileniyor", percent: null, message: "", done: false, failed: false });
+          const result = await cizi.repairClaudeDesktop();
           target.disabled = false;
-          target.textContent = "Onar";
-          if (res.ok && res.data?.reconciled) toast("Claude Desktop ayarları yenilendi.", "good");
-          else if (res.ok) toast(res.data?.reason === "running" ? "Önce Claude Desktop'ı kapatın." : "Onarım tamamlanamadı.", "bad");
-          else toast(clientMessage(res.error || "Onarım başarısız."), "bad");
-          await loadTemplatesAndTools();
+          if (result.ok && result.data?.reconciled) {
+            setProgress(CLAUDE_DESKTOP, { label: "Ayarlar yenilendi", percent: 100, done: true });
+            toast("Claude Desktop ayarları yenilendi.", "good");
+          } else {
+            const message = result.ok
+              ? (result.data?.reason === "running" ? "Önce Claude Desktop'ı kapatın." : "Onarım tamamlanamadı.")
+              : clientMessage(result.error);
+            setProgress(CLAUDE_DESKTOP, { label: "Onarım tamamlanamadı", message, failed: true, done: true });
+            toast(message, "bad");
+          }
+          await loadTools();
         },
       }));
     }
     if (desktop.running) {
       actions.appendChild(button({
-        label: "Kapat", className: "ghost tiny-btn", cliId: "claude-desktop.stop", cliLabel: "Claude Desktop kapat",
+        label: "Kapat", cliId: "claude-desktop.stop", cliLabel: "Claude Desktop kapat",
         title: "Ayar değiştirmeden önce Claude Desktop tamamen kapatılmalıdır",
         onClick: async (event) => {
-          const target = event.currentTarget;
-          target.disabled = true;
-          const res = await cizi.stopClaudeDesktop();
-          target.disabled = false;
-          if (res.ok) toast("Claude Desktop kapatıldı.", "good");
-          else toast(clientMessage(res.error || "Claude Desktop kapatılamadı."), "bad");
-          await loadTemplatesAndTools();
+          event.currentTarget.disabled = true;
+          const result = await cizi.stopClaudeDesktop();
+          toast(result.ok ? "Claude Desktop kapatıldı." : clientMessage(result.error), result.ok ? "good" : "bad");
+          await loadTools();
         },
       }));
     }
-    // The other products all offer a root removal; Claude Desktop lost it in the
-    // port. It previews exactly what would be deleted before anything happens.
-    actions.appendChild(button({
-      label: "Kökten Kaldır", className: "ghost tiny-btn danger", cliId: "claude-desktop.purge",
-      cliLabel: "Claude Desktop kökten kaldır", long: true,
-      onClick: async (event) => {
-        const target = event.currentTarget;
-        target.disabled = true;
-        const planRes = await cizi.planClaudeDesktopUninstall();
-        if (!planRes.ok) {
-          target.disabled = false;
-          toast(clientMessage(planRes.error || "Kaldırma planı alınamadı."), "bad");
-          return;
-        }
-        if (!confirm(describeRemovalPlan(planRes.data, CLAUDE_DESKTOP_NAME))) {
-          target.disabled = false;
-          return;
-        }
-        target.textContent = "Kaldırılıyor...";
-        updateClaudeProgress({ phase: "uninstalling", message: "Claude Desktop kaldırılıyor...", details: null });
-        const res = await cizi.uninstallClaudeDesktop(true);
-        target.disabled = false;
-        target.textContent = "Kökten Kaldır";
-        if (res.ok) {
-          updateClaudeProgress({ phase: "complete", message: "Claude Desktop kaldırıldı.", details: null });
-          const remaining = res.data?.remainingDirectories?.length || 0;
-          toast(remaining
-            ? `Claude Desktop kaldırıldı. ${remaining} klasör silinemedi.`
-            : "Claude Desktop kökten kaldırıldı.", remaining ? "warn" : "good");
-          clog("success", "Claude Desktop kökten kaldırıldı");
-          setTimeout(() => updateClaudeProgress({ phase: "idle", message: "", details: null }), 2500);
-        } else {
-          updateClaudeProgress({ phase: "error", message: res.error || "Claude Desktop kaldırılamadı.", details: null });
-          toast(clientMessage(res.error || "Claude Desktop kaldırılamadı."), "bad");
-        }
-        await loadTemplatesAndTools();
-      },
-    }));
+    actions.appendChild(removeSplit(CLAUDE_DESKTOP));
   }
 
-  block.appendChild(head);
-  block.appendChild(actions);
-  return block;
-}
-
-// The Codex row. ChatGPT Desktop and the Codex CLI run the same codex-cli core
-// and read the same ~/.codex/config.toml, so a single switch configures both.
-function renderCodexRow(st, models) {
-  const row = document.createElement("div");
-  row.className = "tool-row codex-row";
-
-  const info = document.createElement("div");
-  info.className = "tool-info";
-  const name = document.createElement("div");
-  name.className = "tool-name";
-  name.textContent = st.name;
-  const sub = document.createElement("div");
-  sub.className = "tool-sub";
-  const anyInstalled = CODEX_DESKTOP_STATUS.installed || CODEX_CLI_STATUS.installed;
-  const desiredEnabled = st.desiredEnabled == null ? st.applied === true : st.desiredEnabled === true;
-  sub.textContent = desiredEnabled && !st.applied
-    ? "Bağlantı açık tutuluyor; eksik Codex ayarları otomatik yeniden uygulanacak"
-    : st.applied && desiredEnabled
-    ? `Bağlı — tek ayar dosyası ikisini de yönetiyor (${CODEX_CONFIG_STATE.path || "~/.codex/config.toml"})`
-    : anyInstalled
-      ? "Tek anahtar ChatGPT Desktop ve Codex CLI'yi birlikte Cizi Code'a bağlar"
-      : "Bağlamak için önce en az bir Codex ürünü kurun";
-  info.appendChild(name);
-  info.appendChild(sub);
-
-  const actions = document.createElement("div");
-  actions.className = "tool-actions";
-
-  actions.appendChild(automaticModelSummary(models, "codex"));
-
-  const sw = document.createElement("label");
-  sw.className = "switch";
-  const cb = document.createElement("input");
-  cb.type = "checkbox";
-  cb.dataset.cliId = "tool.codex.switch";
-  cb.dataset.cliLabel = "Codex bağlantısı";
-  cb.checked = desiredEnabled;
-  cb.disabled = !anyInstalled;
-  if (!anyInstalled) sw.title = "Önce ChatGPT Desktop veya Codex CLI kurun";
-  const slider = document.createElement("span");
-  slider.className = "slider";
-  sw.appendChild(cb);
-  sw.appendChild(slider);
-  actions.appendChild(sw);
-
-  cb.addEventListener("change", async () => {
-    cb.disabled = true;
-    const turningOn = cb.checked;
-    clog("info", `Codex: ${turningOn ? "bağlanıyor" : "geri alınıyor"}`, { tool: st.id });
-    if (turningOn) {
-      if (!modelNames(models).length) {
-        toast("Bu anahtar için model bulunamadı.", "bad");
-        cb.checked = false;
-        cb.disabled = false;
-        return;
-      }
-      const res = await cizi.applyTool(st.id);
-      if (res.ok) {
-        const count = res.data?.modelCount || modelNames(models).length;
-        toast(CODEX_DESKTOP_STATUS.installed
-          ? `Codex bağlandı; ${count} model eklendi. ChatGPT Desktop'ı yeniden başlatıp yeni bir Codex sohbeti açın.`
-          : `Codex bağlandı; ${count} model eklendi.`, "good");
-      } else {
-        toast(clientMessage(res.error || "Codex bağlanamadı."), "bad");
-        cb.checked = false;
-      }
-    } else {
-      const res = await cizi.revertTool(st.id);
-      if (res.ok && !res.data?.applied) toast("Codex bağlantısı kaldırıldı; diğer ayarlarınız korundu.", "good");
-      else {
-        toast(clientMessage(res.error || "Codex bağlantısı geri alınamadı."), "bad");
-        cb.checked = true;
-      }
-    }
-    cb.disabled = false;
-    await loadTemplatesAndTools();
-    loadLogs();
+  return card({
+    switchId: CLAUDE_DESKTOP,
+    title: NAMES[CLAUDE_DESKTOP],
+    state,
+    fact: `${fact}${embedded}`,
+    models,
+    family: CLAUDE_CODE,
+    actions,
   });
-
-  row.appendChild(info);
-  row.appendChild(actions);
-
-  const products = document.createElement("div");
-  products.className = "codex-products";
-
-  products.appendChild(codexProductBlock({
-    name: CODEX_DESKTOP_NAME,
-    idPrefix: "codex-desktop",
-    status: CODEX_DESKTOP_STATUS,
-    detail: CODEX_DESKTOP_STATUS.installed
-      ? `Kurulu · sürüm ${CODEX_DESKTOP_STATUS.version || "bilinmiyor"}`
-      : "Kurulu değil · Microsoft Store'dan kurulur",
-    installLabel: "İndir ve Kur",
-    siteLabel: "Mağaza sayfası",
-    onInstall: async (event) => {
-      const target = event.currentTarget;
-      target.disabled = true;
-      target.textContent = "Kuruluyor...";
-      updateCodexDesktopInstallFeedback({ status: "starting", percent: null, message: "Microsoft Store kurulumu başlatılıyor...", operations: [] });
-      let res;
-      try { res = await cizi.installCodexDesktop(); } catch (error) { res = { ok: false, error: error?.message || "ChatGPT Desktop kurulamadı." }; }
-      if (res.ok && res.data?.installed) {
-        updateCodexDesktopInstallFeedback({ status: "installed", percent: 100, message: "ChatGPT Desktop kuruldu." });
-        toast("ChatGPT Desktop kuruldu.", "good");
-        clog("success", "ChatGPT Desktop kuruldu");
-        await loadTemplatesAndTools();
-        setTimeout(() => updateCodexDesktopInstallFeedback({ status: "idle", percent: null, message: "", operations: [] }), 2500);
-      } else {
-        target.disabled = false;
-        target.textContent = "İndir ve Kur";
-        updateCodexDesktopInstallFeedback({ status: "error", message: res.error || "ChatGPT Desktop kurulamadı." });
-        toast(clientMessage(res.error || "ChatGPT Desktop kurulamadı."), "bad");
-      }
-    },
-    onSite: async () => {
-      const res = await cizi.openCodexDesktopStore();
-      if (!res.ok) toast(clientMessage(res.error || "Mağaza sayfası açılamadı."), "bad");
-    },
-    onOpen: async (event) => {
-      const target = event.currentTarget;
-      target.disabled = true;
-      const res = await cizi.openCodexDesktop();
-      target.disabled = false;
-      if (res.ok) toast("ChatGPT Desktop açıldı.", "good");
-      else toast(clientMessage(res.error || "ChatGPT Desktop açılamadı."), "bad");
-    },
-    onRemove: async (event) => {
-      const target = event.currentTarget;
-      const planRes = await cizi.planCodexDesktopUninstall();
-      if (!planRes.ok) {
-        toast(clientMessage(planRes.error || "Kaldırma planı hazırlanamadı."), "bad");
-        return;
-      }
-      const plan = planRes.data;
-      if (!confirm(describeRemovalPlan(plan, CODEX_DESKTOP_NAME))) return;
-      target.disabled = true;
-      target.textContent = "Kaldırılıyor...";
-      clog("info", "ChatGPT Desktop kökten kaldırılıyor", { sharedRemovable: plan.sharedRemovable });
-      const res = await cizi.uninstallCodexDesktop(plan.sharedRemovable === true);
-      if (res.ok && res.data?.ok) {
-        toast("ChatGPT Desktop kaldırıldı.", "good");
-        clog("success", "ChatGPT Desktop kökten kaldırıldı");
-      } else {
-        toast(clientMessage(res.error || "Kaldırma kısmen tamamlandı."), "bad");
-        clog("warning", "ChatGPT Desktop kaldırma kısmen tamamlandı");
-      }
-      await loadTemplatesAndTools();
-    },
-  }));
-
-  products.appendChild(codexProductBlock({
-    name: CODEX_CLI_NAME,
-    idPrefix: "codex-cli",
-    status: CODEX_CLI_STATUS,
-    detail: CODEX_CLI_STATUS.installed
-      ? `Kurulu · ${CODEX_CLI_STATUS.version || CODEX_CLI_STATUS.command}`
-      : "Kurulu değil · resmî yükleyiciyle kurulur",
-    installLabel: "İndir ve Kur",
-    siteLabel: "Resmî site",
-    onInstall: async (event) => {
-      const target = event.currentTarget;
-      target.disabled = true;
-      target.textContent = "Kuruluyor...";
-      updateCodexInstallFeedback({ status: "starting", percent: null, message: "Resmî Codex yükleyicisi başlatılıyor...", operations: [] });
-      let res;
-      try { res = await cizi.installCodexCli(); } catch (error) { res = { ok: false, error: error?.message || "Codex CLI kurulamadı." }; }
-      if (res.ok && res.data?.installed) {
-        updateCodexInstallFeedback({ status: "installed", percent: 100, message: "Codex CLI kuruldu." });
-        toast("Codex CLI kuruldu.", "good");
-        await loadTemplatesAndTools();
-        setTimeout(() => updateCodexInstallFeedback({ status: "idle", percent: null, message: "", operations: [] }), 2500);
-      } else {
-        target.disabled = false;
-        target.textContent = "İndir ve Kur";
-        updateCodexInstallFeedback({ status: "error", message: res.error || "Codex CLI kurulamadı." });
-        toast(clientMessage(res.error || "Codex CLI kurulamadı."), "bad");
-      }
-    },
-    onSite: async () => {
-      const res = await cizi.openCodexCliSite();
-      if (!res.ok) toast(clientMessage(res.error || "Resmî site açılamadı."), "bad");
-    },
-    onOpen: async (event) => {
-      const target = event.currentTarget;
-      target.disabled = true;
-      const res = await cizi.openCodexCli(!!st.applied);
-      target.disabled = false;
-      if (res.ok) toast(st.applied ? "Codex CLI Cizi Code bağlantısıyla açıldı." : "Codex CLI kendi ayarlarıyla açıldı.", "good");
-      else toast(clientMessage(res.error || "Codex CLI başlatılamadı."), "bad");
-    },
-    onRemove: async (event) => {
-      const target = event.currentTarget;
-      const planRes = await cizi.planCodexCliUninstall();
-      if (!planRes.ok) {
-        toast(clientMessage(planRes.error || "Kaldırma planı hazırlanamadı."), "bad");
-        return;
-      }
-      const plan = planRes.data;
-      if (!confirm(describeRemovalPlan(plan, CODEX_CLI_NAME))) return;
-      target.disabled = true;
-      target.textContent = "Kaldırılıyor...";
-      clog("info", "Codex CLI kökten kaldırılıyor", { sharedRemovable: plan.sharedRemovable });
-      const res = await cizi.uninstallCodexCli(plan.sharedRemovable === true);
-      if (res.ok && res.data?.ok) {
-        toast("Codex CLI kaldırıldı.", "good");
-        clog("success", "Codex CLI kökten kaldırıldı");
-      } else {
-        toast(clientMessage(res.error || "Kaldırma kısmen tamamlandı."), "bad");
-        clog("warning", "Codex CLI kaldırma kısmen tamamlandı");
-      }
-      await loadTemplatesAndTools();
-    },
-  }));
-
-  row.appendChild(products);
-  return row;
 }
+
+// Codex kartı: TEK anahtar, iki ürün. ChatGPT Desktop ve Codex CLI aynı
+// codex-cli çekirdeğini çalıştırıp aynı ~/.codex/config.toml'u okuyor, bu yüzden
+// tek dosyayı yapılandırmak ikisini de bağlar. Kaldırma ise ürün başına ayrıdır.
+function codexCard(status, models) {
+  const cli = CODEX_STATE.cli || { installed: false };
+  const desktop = CODEX_STATE.desktop || { installed: false };
+  // Eklenti de bir Codex kurulumudur: yalnızca o varsa bile anahtar açılabilmeli.
+  const extensions = cli.editorExtensions || [];
+  const anyInstalled = Boolean(cli.installed || desktop.installed || extensions.length);
+  const desiredEnabled = status.desiredEnabled == null ? status.applied === true : status.desiredEnabled === true;
+  const state = {
+    ...switchState({
+      desiredEnabled,
+      applied: status.applied === true,
+      restorable: status.restorable === true,
+      installed: anyInstalled,
+      blocked: status.blocked === true,
+      blockReason: status.blockReason,
+    }),
+    desiredEnabled,
+    switchDisabled: !anyInstalled,
+    switchTitle: anyInstalled ? null : "Önce ChatGPT Desktop veya Codex CLI kurun",
+  };
+
+  const codexCliFact = () => {
+    const hasStandalone = cli.installed === true;
+    if (!hasStandalone && extensions.length) {
+      return `Bağımsız CLI kurulu değil · ${editorName(extensions[0]?.editor) || "VS Code"} eklentisinde Codex var (${extensions[0]?.version || "bilinmiyor"}) — anahtar aynı config.toml üzerinden eklentiyi de bağlar · bağımsız CLI ekleyebilirsiniz`;
+    }
+    if (hasStandalone && cli.installation !== "vscode-extension") return `Kurulu · ${cli.version || cli.command}`;
+    if (!hasStandalone) return "Kurulu değil · resmî yükleyiciyle kurulur";
+    return `Kurulu · ${cli.version || cli.command}`;
+  };
+
+  const codexCliActions = document.createElement("div");
+  codexCliActions.className = "actions";
+  if (cli.installed) {
+    codexCliActions.appendChild(button({
+      label: "Aç", cliId: "codex-cli.open", cliLabel: "Codex CLI aç",
+      onClick: async (event) => {
+        event.currentTarget.disabled = true;
+        const result = await cizi.openCodexCli(status.applied === true);
+        event.currentTarget.disabled = false;
+        toast(result.ok
+          ? (status.applied ? "Codex CLI Cizi Code bağlantısıyla açıldı." : "Codex CLI kendi ayarlarıyla açıldı.")
+          : clientMessage(result.error), result.ok ? "good" : "bad");
+      },
+    }));
+    codexCliActions.appendChild(removeSplit(CODEX_CLI_PRODUCT));
+  }
+  if (!cli.installed) {
+    codexCliActions.append(...installActions({
+      productId: CODEX_CLI_PRODUCT,
+      name: NAMES[CODEX_CLI_PRODUCT],
+      install: () => runInstall({ scope: CODEX_CLI_PRODUCT, name: NAMES[CODEX_CLI_PRODUCT], call: () => cizi.installCodexCli() }),
+      downloadOnly: () => runDownloadOnly({ scope: CODEX_CLI_PRODUCT, name: NAMES[CODEX_CLI_PRODUCT], call: () => cizi.downloadCodexCli() }),
+      site: async () => {
+        const result = await cizi.openCodexCliSite();
+        if (!result.ok) toast(clientMessage(result.error), "bad");
+      },
+    }).childNodes);
+  }
+
+  const lanes = document.createElement("div");
+  lanes.className = "lanes";
+
+  // Bir ürün şeridi: adı, tek satır olgusu, kendi eylemleri ve kendi ilerleme
+  // şeridi. Codex CLI kurulurken ChatGPT Desktop şeridinin ilerlemesi ayrı kalır.
+  const productLane = ({ productId, fact, actions }) => {
+    const row = document.createElement("div");
+    row.className = "product";
+    const name = document.createElement("div");
+    name.className = "product-name";
+    name.textContent = NAMES[productId];
+    const factElement = document.createElement("div");
+    factElement.className = "product-fact";
+    factElement.textContent = fact;
+    row.append(name, actions, factElement);
+    const wrapper = document.createElement("div");
+    wrapper.append(row, laneElement(productId));
+    return wrapper;
+  };
+
+  const desktopActions = document.createElement("div");
+  desktopActions.className = "actions";
+  if (desktop.installed) {
+    desktopActions.appendChild(button({
+      label: "Aç", cliId: "codex-desktop.open", cliLabel: "ChatGPT Desktop aç",
+      onClick: async (event) => {
+        event.currentTarget.disabled = true;
+        const result = await cizi.openCodexDesktop();
+        event.currentTarget.disabled = false;
+        toast(result.ok ? "ChatGPT Desktop açıldı." : clientMessage(result.error), result.ok ? "good" : "bad");
+      },
+    }));
+    desktopActions.appendChild(removeSplit(CODEX_DESKTOP_PRODUCT));
+  } else {
+    desktopActions.append(...installActions({
+      productId: CODEX_DESKTOP_PRODUCT,
+      name: NAMES[CODEX_DESKTOP_PRODUCT],
+      siteLabel: "Mağaza sayfası",
+      install: () => runInstall({ scope: CODEX_DESKTOP_PRODUCT, name: NAMES[CODEX_DESKTOP_PRODUCT], call: () => cizi.installCodexDesktop() }),
+      // Microsoft Store kurulumunun indirilebilir bir dosyası yok; menü bunu
+      // söyler, sessizce çalışmayan bir düğme göstermez.
+      downloadOnly: null,
+      site: async () => {
+        const result = await cizi.openCodexDesktopStore();
+        if (!result.ok) toast(clientMessage(result.error), "bad");
+      },
+    }).childNodes);
+  }
+
+  lanes.append(
+    productLane({
+      productId: CODEX_DESKTOP_PRODUCT,
+      fact: desktop.installed ? `Kurulu · sürüm ${desktop.version || "bilinmiyor"}` : "Kurulu değil · Microsoft Store'dan kurulur",
+      actions: desktopActions,
+    }),
+    productLane({
+      productId: CODEX_CLI_PRODUCT,
+      fact: codexCliFact(),
+      actions: codexCliActions,
+    }),
+  );
+
+  // Üçüncü yüzey: kod düzenleyici eklentisi. Kurmayı/kaldırmayı düzenleyici
+  // yapıyor, o yüzden bizim düğmemiz yok — ama aynı config.toml'u okuduğu için
+  // anahtarın onu da kapsadığı söylenmeli.
+  if (extensions.length) {
+    const row = document.createElement("div");
+    row.className = "product";
+    const name = document.createElement("div");
+    name.className = "product-name";
+    name.textContent = `Codex — ${editorNames(extensions)} eklentisi`;
+    const fact = document.createElement("div");
+    fact.className = "product-fact";
+    const active = extensions.find((item) => item.active !== false) || extensions[0];
+    fact.textContent = `Kurulu · ${active.version || "sürüm bilinmiyor"} · düzenleyici yönetiyor`
+      + " · aynı ayar dosyası bunu da yapılandırır";
+    const note = document.createElement("div");
+    note.className = "product-fact";
+    row.append(name, fact);
+    const wrapper = document.createElement("div");
+    wrapper.append(row);
+    // WSL modu açıksa eklenti config.toml'u WSL'in İÇİNDEN okuyor; bizim
+    // Windows tarafına yazdığımız dosya oraya ulaşmaz. Bunu söylememek,
+    // "Bağlı" derken aslında bağlı olmayan bir kurulum bırakmak olurdu.
+    if ((cli.wslEditors || []).length) {
+      note.textContent = `Dikkat: ${editorNames(cli.wslEditors)} içinde Codex WSL'de çalışacak şekilde ayarlı.`
+        + " O modda ayarlar WSL'in kendi ~/.codex klasöründen okunur; bu anahtar oraya yazmaz."
+        + " WSL içinde Cizi Code'u ayrıca yapılandırmanız gerekir.";
+      note.style.color = "var(--warn)";
+      wrapper.append(note);
+    }
+    lanes.append(wrapper);
+  }
+
+  return card({
+    switchId: CODEX,
+    title: "Codex (CLI + ChatGPT Desktop)",
+    state,
+    fact: state.key === "on"
+      ? `Tek ayar dosyası ikisini de yönetiyor (${CODEX_STATE.configPath || "~/.codex/config.toml"})`
+      : "Tek anahtar ChatGPT Desktop ve Codex CLI'yi birlikte Cizi Code'a bağlar",
+    models,
+    family: CODEX,
+    actions: document.createElement("div"),
+    extra: lanes,
+  });
+}
+
+const CARDS = {
+  [CLAUDE_CODE]: claudeCodeCard,
+  [CLAUDE_DESKTOP]: claudeDesktopCard,
+  [CODEX]: codexCard,
+};
 
 function renderTools(statuses) {
   const list = $("tools-list");
+  closeMenu();
   list.innerHTML = "";
-  if (!TEMPLATES) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "Tool access could not be loaded.";
-    list.appendChild(empty);
-    return;
-  }
 
   const models = TEMPLATES?.combos || [];
-  const templateTools = Array.isArray(TEMPLATES?.tools) ? TEMPLATES.tools : [];
-  const enabledIds = new Set(templateTools.filter((t) => t.enabled).map((t) => t.id));
-  const offered = templateTools
-    .map((t) => t.id)
-    .filter((id) => FIRST_RELEASE_TOOLS.includes(id))
-    // The key's own model families decide which products it may configure.
-    .filter((id) => !toolIsGated(id) || toolIsUnlocked(models, id));
+  // Anahtarın kendi model listesi hangi yerel ürünleri yapılandırabileceğine
+  // karar verir: kapı, anahtarın YAZDIĞI aileye sorulur, satır kimliğine değil.
+  const offered = SWITCH_IDS.filter((id) => !toolIsGated(familyFor(id)) || toolIsUnlocked(models, familyFor(id)));
 
   if (!offered.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = modelNames(models).length
       ? "Bu anahtarın modelleri hiçbir yerel araçla eşleşmiyor."
-      : "No command-line tool is available for this key.";
+      : "Bu anahtar için yerel araç bulunmuyor.";
     list.appendChild(empty);
     return;
   }
 
-  for (const st of statuses) {
-    if (!offered.includes(st.id)) continue;
-
-    // Claude and Codex are each one switch over two products, so their rows are
-    // built on their own instead of through the single-tool layout. Each row
-    // only ever sees the models of its own family.
-    if (st.id === CODEX_CLI_TOOL_ID) {
-      list.appendChild(renderCodexRow(st, modelsForTool(models, CODEX_CLI_TOOL_ID)));
-      continue;
-    }
-    if (st.id === CLAUDE_CODE_CLI_TOOL_ID) {
-      list.appendChild(renderClaudeRow(st, modelsForTool(models, CLAUDE_CODE_CLI_TOOL_ID)));
-      continue;
-    }
-
-    const row = document.createElement("div");
-    row.className = "tool-row";
-
-    const info = document.createElement("div");
-    info.className = "tool-info";
-
-    const name = document.createElement("div");
-    name.className = "tool-name";
-    name.textContent = st.name;
-
-    const sub = document.createElement("div");
-    sub.className = "tool-sub";
-    const desiredEnabled = st.desiredEnabled == null ? st.applied === true : st.desiredEnabled === true;
-    sub.textContent = st.applied && desiredEnabled
-      ? `${st.name} is connected to Cizi Code`
-      : desiredEnabled
-        ? "Bağlantı açık tutuluyor; eksik ayarlar otomatik yeniden uygulanacak"
-      : st.hasBackup
-        ? "Turn on to reconnect, or leave off to keep your previous settings"
-        : `Turn on to prepare ${st.name} automatically`;
-
-    info.appendChild(name);
-    info.appendChild(sub);
-
-    const actions = document.createElement("div");
-    actions.className = "tool-actions";
-    const sw = document.createElement("label");
-    sw.className = "switch";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.dataset.cliId = `tool.${st.id}.switch`;
-    cb.dataset.cliLabel = `${st.name} connection`;
-    cb.checked = desiredEnabled;
-    cb.disabled = enabledIds.size > 0 && !enabledIds.has(st.id);
-    const slider = document.createElement("span");
-    slider.className = "slider";
-    sw.appendChild(cb);
-    sw.appendChild(slider);
-    actions.appendChild(sw);
-    cb.addEventListener("change", async () => {
-      cb.disabled = true;
-      clog("info", `${st.name}: ${cb.checked ? "connect" : "restore"}`, { tool: st.id });
-      if (cb.checked) {
-        if (!modelNames(models).length) {
-          toast("No model is available for this key.", "bad");
-          cb.checked = false;
-          cb.disabled = false;
-          return;
-        }
-        const res = await cizi.applyTool(st.id);
-        if (res.ok) toast(`${st.name} connected.`, "good");
-        else {
-          toast(clientMessage(res.error || "Could not connect this tool."), "bad");
-          cb.checked = false;
-        }
-      } else {
-        const res = await cizi.revertTool(st.id);
-        if (res.ok && !res.applied) {
-          toast(res.restored ? `${st.name} restored.` : `${st.name} disconnected.`, "good");
-        }
-        else {
-          toast(clientMessage(res.error || "Could not restore this tool."), "bad");
-          cb.checked = true;
-        }
-      }
-      cb.disabled = false;
-      const r = await cizi.listTools();
-      if (r.ok) renderTools(r.data);
-      loadLogs();
-    });
-
-    row.appendChild(info);
-    row.appendChild(actions);
-    list.appendChild(row);
+  const byId = new Map((statuses || []).map((status) => [status.id, status]));
+  for (const switchId of offered) {
+    const status = byId.get(switchId);
+    if (!status) continue;
+    list.appendChild(CARDS[switchId](status, modelsForTool(models, familyFor(switchId))));
   }
 
   if (!list.children.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No matching local tools were found.";
+    empty.textContent = "Eşleşen yerel araç bulunamadı.";
     list.appendChild(empty);
   }
+  // Kart yeniden çizildiğinde süren bir iş varsa şeridi geri boya.
+  for (const scope of PROGRESS.keys()) paintLane(scope);
 }
 
-function logTime(ts) {
-  try {
-    return new Date(ts).toLocaleTimeString();
-  } catch {
-    return ts;
-  }
-}
-
-async function loadLogs() {
-  if (!document.getElementById("log-list")) return;
-  const res = await cizi.getLogs(200);
-  if (!res.ok) return;
-  renderLogs(res.data?.entries || []);
-}
-
-function renderLogs(entries) {
-  const box = document.getElementById("log-list");
-  if (!box) return;
-  const filter = document.getElementById("log-level-filter")?.value || "";
-  const rows = (filter ? entries.filter((e) => e.level === filter) : entries).slice().reverse();
-  if (!rows.length) {
-    box.innerHTML = '<div class="log-empty muted tiny">No activity yet.</div>';
-    return;
-  }
-  box.innerHTML = rows.map((e) => `<div class="log-row log-${escapeHtml(e.level)}">
-      <span class="log-ts">${escapeHtml(logTime(e.ts))}</span>
-      <span class="log-badge log-badge-${escapeHtml(e.level)}">${escapeHtml(String(e.level || "").toUpperCase())}</span>
-      <span class="log-scope">${escapeHtml(e.scope || "")}</span>
-      <span class="log-msg">${escapeHtml(e.message || "")}</span>
-    </div>`).join("");
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-
-function startLogAutoRefresh() {
-  stopLogAutoRefresh();
-  const live = document.getElementById("log-live");
-  if (live && !live.checked) return;
-  if (!document.getElementById("log-list")) return;
-  LOG_TIMER = setInterval(loadLogs, 3000);
-}
-
-function stopLogAutoRefresh() {
-  if (LOG_TIMER) {
-    clearInterval(LOG_TIMER);
-    LOG_TIMER = null;
-  }
-}
+// ---------------------------------------------------------------- güncelleme
 
 function renderUpdateState(state) {
-  const banner = $("update-banner");
-  const msg = $("update-message");
-  const install = $("update-install");
   const visible = ["available", "downloading", "installing", "ready", "error"].includes(state?.status);
-  banner.classList.toggle("hidden", !visible);
-  install.classList.toggle("hidden", state?.status !== "ready");
-  msg.textContent = state?.message || "";
+  $("update-banner").classList.toggle("hidden", !visible);
+  $("update-install").classList.toggle("hidden", state?.status !== "ready");
+  $("update-message").textContent = state?.message || "";
 }
 
 async function refreshUpdateState() {
-  const res = await cizi.getUpdateState();
-  if (res.ok) renderUpdateState(res.data);
+  const result = await cizi.getUpdateState();
+  if (result.ok) renderUpdateState(result.data);
 }
 
+// -------------------------------------------------------------------- olaylar
+
 $("login-btn").addEventListener("click", doLogin);
-$("login-key").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") doLogin();
-});
+$("login-key").addEventListener("keydown", (event) => { if (event.key === "Enter") doLogin(); });
+
 $("logout-btn").addEventListener("click", async () => {
-  clog("info", "Signed out");
-  stopLogAutoRefresh();
+  clog("info", "Çıkış yapıldı");
   await cizi.logout();
   show("login");
 });
-$("period-select").addEventListener("change", (e) => loadUsage(e.target.value));
+
+$("period-select").addEventListener("change", (event) => loadUsage(event.target.value));
+
 $("usage-refresh").addEventListener("click", async () => {
-  const btn = $("usage-refresh");
-  btn.disabled = true;
-  const original = btn.textContent;
-  btn.textContent = "Refreshing...";
+  const target = $("usage-refresh");
+  const original = target.textContent;
+  target.disabled = true;
+  target.textContent = "Yenileniyor...";
   try {
-    await refreshDashboardData();
-    toast("Usage refreshed.", "good");
+    await refreshAll();
+    toast("Bilgiler yenilendi.", "good");
   } finally {
-    btn.textContent = original;
-    btn.disabled = false;
+    target.textContent = original;
+    target.disabled = false;
   }
 });
 
 $("tool-reconcile-all").addEventListener("click", async () => {
-  const btn = $("tool-reconcile-all");
-  btn.disabled = true;
-  const original = btn.textContent;
-  btn.textContent = "Doğrulanıyor...";
+  const target = $("tool-reconcile-all");
+  const original = target.textContent;
+  target.disabled = true;
+  target.textContent = "Doğrulanıyor...";
   try {
-    const res = await cizi.reconcileTools();
-    if (!res.ok) {
-      toast(clientMessage(res.error || "Bağlantılar doğrulanamadı."), "bad");
+    const result = await cizi.reconcileTools();
+    if (!result.ok) {
+      toast(clientMessage(result.error || "Bağlantılar doğrulanamadı."), "bad");
       return;
     }
-    await loadTemplatesAndTools();
-    const report = res.data || {};
+    await loadTools();
+    const report = result.data || {};
     const message = report.failed
       ? `${report.failed} bağlantı doğrulanamadı.`
       : report.pending
@@ -1420,51 +1423,102 @@ $("tool-reconcile-all").addEventListener("click", async () => {
           : "Tüm bağlantılar doğrulandı.";
     toast(message, report.failed ? "bad" : report.pending ? "warn" : "good");
   } finally {
-    btn.textContent = original;
-    btn.disabled = false;
-    loadLogs();
+    target.textContent = original;
+    target.disabled = false;
   }
 });
-
-if (document.getElementById("log-refresh")) $("log-refresh").addEventListener("click", loadLogs);
-if (document.getElementById("log-level-filter")) $("log-level-filter").addEventListener("change", loadLogs);
-if (document.getElementById("log-open")) $("log-open").addEventListener("click", async () => { await cizi.openLogFile(); });
-if (document.getElementById("log-clear")) $("log-clear").addEventListener("click", async () => { await cizi.clearLogs(); await loadLogs(); });
-if (document.getElementById("log-live")) {
-  $("log-live").addEventListener("change", (e) => {
-    if (e.target.checked) startLogAutoRefresh();
-    else stopLogAutoRefresh();
-  });
-}
 
 $("update-check").addEventListener("click", async () => {
-  const res = await cizi.checkForUpdates();
-  if (res.ok) {
-    renderUpdateState(res.data);
-    if (["current", "skipped"].includes(res.data?.status)) toast(res.data.message, "good");
-  } else {
-    toast(clientMessage(res.error || "Update check failed."), "bad");
+  const result = await cizi.checkForUpdates();
+  if (!result.ok) {
+    toast(clientMessage(result.error || "Güncelleme denetimi başarısız."), "bad");
+    return;
   }
+  renderUpdateState(result.data);
+  if (["current", "skipped"].includes(result.data?.status)) toast(result.data.message, "good");
 });
+
 $("update-install").addEventListener("click", async () => {
-  const res = await cizi.installUpdate();
-  if (!res.ok) toast(clientMessage(res.error || "Update could not be installed."), "bad");
+  const result = await cizi.installUpdate();
+  if (!result.ok) toast(clientMessage(result.error || "Güncelleme kurulamadı."), "bad");
 });
+
+window.addEventListener("resize", () => {
+  clearTimeout(window.__ciziChartTimer);
+  window.__ciziChartTimer = setTimeout(() => loadUsage($("period-select").value), 200);
+});
+
+// Anahtar çevirmenin adımları. Şeridin başlığı adımı söyler, mesajı ayrıntıyı.
+const SWITCH_PHASE_LABELS = {
+  precheck: "Ürün ve ayarlar denetleniyor",
+  models: "Modeller hazırlanıyor",
+  backup: "Mevcut ayarlarınız yedekleniyor",
+  apply: "Ayarlar uygulanıyor",
+  verify: "Yazılanlar doğrulanıyor",
+  restore: "Orijinal ayarlar geri yükleniyor",
+  removing: "Kaldırılıyor",
+  done: "Tamamlandı",
+};
+
+const CLAUDE_PHASE_LABELS = {
+  starting: "Kuruluma hazırlanılıyor",
+  downloading: "Claude Desktop indiriliyor",
+  "verifying-signature": "Dijital imza doğrulanıyor",
+  installing: "Claude Desktop kuruluyor",
+  verifying: "Kurulum doğrulanıyor",
+  uninstalling: "Claude Desktop kaldırılıyor",
+  configuring: "Ayarlar uygulanıyor",
+  authenticating: "Kimlik doğrulama hazırlanıyor",
+  translating: "Türkçe arayüz çevirisi uygulanıyor",
+  restoring: "Önceki ayarlara dönülüyor",
+  stopping: "Claude Desktop kapatılıyor",
+  repairing: "Ayarlar yenileniyor",
+  complete: "Tamamlandı",
+  error: "İşlem tamamlanamadı",
+};
+
+const CLAUDE_CODE_INSTALL_PHASE_LABELS = {
+  detecting: "Claude Code CLI aranıyor",
+  download: "Claude Code CLI indiriliyor",
+  install: "Claude Code CLI kuruluyor",
+  verify: "Claude Code CLI kurulumu doğrulanıyor",
+  complete: "Claude Code CLI kuruldu",
+  error: "Claude Code CLI kurulamadı",
+};
+
 cizi.onUpdateState(renderUpdateState);
-if (cizi.onClaudeCodeInstallState) cizi.onClaudeCodeInstallState(updateClaudeInstallFeedback);
-if (cizi.onCodexCliInstallState) cizi.onCodexCliInstallState(updateCodexInstallFeedback);
-if (cizi.onCodexDesktopInstallState) cizi.onCodexDesktopInstallState(updateCodexDesktopInstallFeedback);
-if (cizi.onClaudeProgress) cizi.onClaudeProgress(updateClaudeProgress);
+// Dört ayrı ilerleme kaynağı tek çizim yoluna bağlanır.
+cizi.onProgress?.((event) => setProgress(event?.scope, {
+  label: SWITCH_PHASE_LABELS[event?.phase] || NAMES[event?.scope] || "Çalışıyor",
+  percent: event?.percent,
+  message: event?.message,
+  done: event?.done === true,
+  failed: Boolean(event?.error),
+}));
+cizi.onClaudeCodeInstallState?.(adoptInstallState(CLAUDE_CODE, "Claude Code CLI kurulumu", CLAUDE_CODE_INSTALL_PHASE_LABELS));
+cizi.onCodexCliInstallState?.(adoptInstallState(CODEX_CLI_PRODUCT, "Codex CLI kurulumu"));
+cizi.onCodexDesktopInstallState?.(adoptInstallState(CODEX_DESKTOP_PRODUCT, "ChatGPT Desktop kurulumu"));
+cizi.onClaudeProgress?.((progress) => {
+  const phase = String(progress?.phase || "");
+  if (!phase || phase === "idle") return;
+  setProgress(CLAUDE_DESKTOP, {
+    label: CLAUDE_PHASE_LABELS[phase] || "Claude Desktop işlemi",
+    percent: Number.isFinite(Number(progress?.details?.percent)) ? Number(progress.details.percent) : null,
+    message: progress?.message || "",
+    done: phase === "complete",
+    failed: phase === "error",
+  });
+});
+
 if (window.ciziCliUi?.handle && cizi.onCliRequest && cizi.cliReady) {
   cizi.onCliRequest((request) => window.ciziCliUi.handle(request));
   cizi.cliReady();
 }
 
 (async function boot() {
-  const sess = await cizi.getSession();
-  if (sess.ok && sess.data?.loggedIn) {
-    await enterDashboard();
-  } else {
+  const session = await cizi.getSession();
+  if (session.ok && session.data?.loggedIn) await enterDashboard();
+  else {
     show("login");
     await refreshUpdateState();
   }

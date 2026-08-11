@@ -1,0 +1,4 @@
+- Prefers communication in Turkish (prompt and explanations in Turkish, even for technical debugging). Confidence: 0.92
+- Prefers VS Code extension detection for Claude Code CLI and Codex CLI to be informational only — extensions should be reported but must not count as a standalone installation or hide/block the independent install flow. Confidence: 0.88
+- Prefers privileged file operations (e.g., patching/branding files under WindowsApps for Claude Desktop) to automatically trigger a UAC elevation prompt with the same UX as installation, rather than instructing to manually retry in an administrator terminal. Confidence: 0.92
+- Prefers troubleshooting of stuck/spinning installs to be done via live inspection of background processes, logs, and system state (winget/AppX/network checks) with evidence-backed diagnosis rather than generic wait/retry advice. Confidence: 0.85

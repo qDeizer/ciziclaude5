@@ -9,11 +9,16 @@ contextBridge.exposeInMainWorld("cizi", {
   getMe: () => ipcRenderer.invoke("cizi:getMe"),
   getUsage: (period) => ipcRenderer.invoke("cizi:getUsage", { period }),
   getTemplates: () => ipcRenderer.invoke("cizi:getTemplates"),
+  // Root removal is one contract for all four products: ask what would go, then
+  // remove exactly the categories the user left selected.
+  planProductRemoval: (productId) => ipcRenderer.invoke("cizi:planProductRemoval", { productId }),
+  removeProduct: (productId, categories) => ipcRenderer.invoke("cizi:removeProduct", { productId, categories }),
+  revealPath: (target) => ipcRenderer.invoke("cizi:revealPath", { target }),
+
   getClaudeCodeStatus: () => ipcRenderer.invoke("cizi:getClaudeCodeStatus"),
   installClaudeCode: () => ipcRenderer.invoke("cizi:installClaudeCode"),
+  downloadClaudeCode: () => ipcRenderer.invoke("cizi:downloadClaudeCode"),
   openClaudeCodeCli: () => ipcRenderer.invoke("cizi:openClaudeCodeCli"),
-  planClaudeCodeUninstall: () => ipcRenderer.invoke("cizi:planClaudeCodeUninstall"),
-  uninstallClaudeCode: () => ipcRenderer.invoke("cizi:uninstallClaudeCode"),
   openClaudeCodeSite: () => ipcRenderer.invoke("cizi:openClaudeCodeSite"),
   onClaudeCodeInstallState: (callback) => {
     const listener = (_event, data) => callback(data);
@@ -22,9 +27,8 @@ contextBridge.exposeInMainWorld("cizi", {
   },
   getCodexCliStatus: () => ipcRenderer.invoke("cizi:getCodexCliStatus"),
   installCodexCli: () => ipcRenderer.invoke("cizi:installCodexCli"),
+  downloadCodexCli: () => ipcRenderer.invoke("cizi:downloadCodexCli"),
   openCodexCli: (useCizi) => ipcRenderer.invoke("cizi:openCodexCli", { useCizi }),
-  planCodexCliUninstall: () => ipcRenderer.invoke("cizi:planCodexCliUninstall"),
-  uninstallCodexCli: (removeShared) => ipcRenderer.invoke("cizi:uninstallCodexCli", { removeShared }),
   openCodexCliSite: () => ipcRenderer.invoke("cizi:openCodexCliSite"),
   onCodexCliInstallState: (callback) => {
     const listener = (_event, data) => callback(data);
@@ -34,11 +38,8 @@ contextBridge.exposeInMainWorld("cizi", {
 
   getClaudeState: () => ipcRenderer.invoke("cizi:getClaudeState"),
   getClaudeProgress: () => ipcRenderer.invoke("cizi:getClaudeProgress"),
-  connectClaude: (closeRunning) => ipcRenderer.invoke("cizi:connectClaude", { closeRunning }),
-  disconnectClaude: (closeRunning) => ipcRenderer.invoke("cizi:disconnectClaude", { closeRunning }),
   installClaudeDesktop: () => ipcRenderer.invoke("cizi:installClaudeDesktop"),
-  planClaudeDesktopUninstall: () => ipcRenderer.invoke("cizi:planClaudeDesktopUninstall"),
-  uninstallClaudeDesktop: (removeLeftovers) => ipcRenderer.invoke("cizi:uninstallClaudeDesktop", { removeLeftovers }),
+  downloadClaudeDesktop: () => ipcRenderer.invoke("cizi:downloadClaudeDesktop"),
   launchClaudeDesktop: () => ipcRenderer.invoke("cizi:launchClaudeDesktop"),
   repairClaudeDesktop: () => ipcRenderer.invoke("cizi:repairClaudeDesktop"),
   stopClaudeDesktop: () => ipcRenderer.invoke("cizi:stopClaudeDesktop"),
@@ -51,9 +52,6 @@ contextBridge.exposeInMainWorld("cizi", {
   getCodexDesktopStatus: () => ipcRenderer.invoke("cizi:getCodexDesktopStatus"),
   installCodexDesktop: () => ipcRenderer.invoke("cizi:installCodexDesktop"),
   openCodexDesktop: () => ipcRenderer.invoke("cizi:openCodexDesktop"),
-  restartCodexDesktop: () => ipcRenderer.invoke("cizi:restartCodexDesktop"),
-  planCodexDesktopUninstall: () => ipcRenderer.invoke("cizi:planCodexDesktopUninstall"),
-  uninstallCodexDesktop: (removeShared) => ipcRenderer.invoke("cizi:uninstallCodexDesktop", { removeShared }),
   openCodexDesktopStore: () => ipcRenderer.invoke("cizi:openCodexDesktopStore"),
   onCodexDesktopInstallState: (callback) => {
     const listener = (_event, data) => callback(data);
@@ -63,9 +61,17 @@ contextBridge.exposeInMainWorld("cizi", {
 
   getCodexState: () => ipcRenderer.invoke("cizi:getCodexState"),
   listTools: () => ipcRenderer.invoke("cizi:listTools"),
-  applyTool: (toolId) => ipcRenderer.invoke("cizi:applyTool", { toolId }),
-  revertTool: (toolId) => ipcRenderer.invoke("cizi:revertTool", { toolId }),
+  applyTool: (toolId, closeRunning) => ipcRenderer.invoke("cizi:applyTool", { toolId, closeRunning }),
+  revertTool: (toolId, closeRunning) => ipcRenderer.invoke("cizi:revertTool", { toolId, closeRunning }),
   reconcileTools: () => ipcRenderer.invoke("cizi:reconcileTools"),
+
+  // One progress channel for everything that takes time: switches, removals,
+  // downloads. `scope` says which card the event belongs to.
+  onProgress: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("cizi:progress", listener);
+    return () => ipcRenderer.removeListener("cizi:progress", listener);
+  },
 
   getLogs: (limit) => ipcRenderer.invoke("cizi:getLogs", { limit }),
   clearLogs: () => ipcRenderer.invoke("cizi:clearLogs"),

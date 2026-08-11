@@ -53,16 +53,8 @@ const ALLOWED_INSTALLER_HOSTS = new Set([
 const MAX_INSTALLER_BYTES = 512 * 1024 * 1024;
 const CLAUDE_PACKAGE_FAMILY = "Claude_pzs8sxrjxfjjc";
 
-const INSTALLER_URLS = Object.freeze({
-  setupX64: "https://claude.ai/api/desktop/win32/x64/setup/latest/redirect",
-  setupArm64: "https://claude.ai/api/desktop/win32/arm64/setup/latest/redirect",
-  msixX64: "https://claude.ai/api/desktop/win32/x64/msix/latest/redirect",
-  msixArm64: "https://claude.ai/api/desktop/win32/arm64/msix/latest/redirect",
-});
-
 // The installer kinds Anthropic publishes. "msix" is the full signed package;
 // "squirrel" is the small online bootstrapper that downloads the rest itself.
-const INSTALL_KINDS = Object.freeze(["msix", "squirrel"]);
 
 function installerFailure(code, publicMessage, diagnostic = {}) {
   const error = new Error(publicMessage);
@@ -84,13 +76,6 @@ async function runPowerShell(script, { env = {}, timeout = 120000, maxBuffer = 4
   return String(result.stdout || "").trim();
 }
 
-function assertInstallKind(kind) {
-  if (!INSTALL_KINDS.includes(kind)) {
-    throw installerFailure("CLAUDE_DESKTOP_INSTALL_KIND_INVALID", "The requested Claude Desktop installer type is not available.");
-  }
-  return kind;
-}
-
 function assertInstallerUrl(value, { stage = "downloading" } = {}) {
   let url;
   try { url = new URL(String(value || "")); }
@@ -103,25 +88,6 @@ function assertInstallerUrl(value, { stage = "downloading" } = {}) {
     );
   }
   return url;
-}
-
-function resolveInstallSource(kind, architecture = process.arch) {
-  assertInstallKind(kind);
-  const normalized = String(architecture || "").toLowerCase() === "arm64" ? "arm64" : "x64";
-  if (kind === "squirrel") {
-    return {
-      kind, architecture: normalized,
-      fileName: `ClaudeSetup-${normalized}.exe`,
-      label: "Claude Desktop çevrimiçi kurucusu",
-      url: normalized === "arm64" ? INSTALLER_URLS.setupArm64 : INSTALLER_URLS.setupX64,
-    };
-  }
-  return {
-    kind, architecture: normalized,
-    fileName: `Claude-${normalized}.msix`,
-    label: "Claude Desktop paketi",
-    url: normalized === "arm64" ? INSTALLER_URLS.msixArm64 : INSTALLER_URLS.msixX64,
-  };
 }
 
 function requestHeaders({ range = false } = {}) {
@@ -283,13 +249,6 @@ async function verifyAnthropicSignature(filePath, {
   return { status: signature.status, subject, thumbprint };
 }
 
-function assertLocalArtifact(kind, filePath) {
-  const expected = kind === "squirrel" ? ".exe" : ".msix";
-  if (path.extname(String(filePath || "")).toLowerCase() !== expected) {
-    throw installerFailure("CLAUDE_DESKTOP_ARTIFACT_TYPE_INVALID", `The selected Claude Desktop installation needs a ${expected} file.`, { stage: "verifying-signature" });
-  }
-}
-
 // --- Removal -------------------------------------------------------------
 //
 // Everything Claude Desktop leaves on a machine, so a removal can be shown to
@@ -306,46 +265,6 @@ function claudeLeftoverDirectories(env = process.env) {
     env.APPDATA && path.join(env.APPDATA, "Claude"),
     env.APPDATA && path.join(env.APPDATA, "AnthropicClaude"),
   ].filter(Boolean);
-}
-
-// The Claude Code CLI keeps its settings and history in ~/.claude. It is a
-// different product with its own switch and its own uninstall, so removing
-// Claude Desktop must never touch it.
-function preservedDirectories(env = process.env) {
-  return [env.USERPROFILE && path.join(env.USERPROFILE, ".claude")].filter(Boolean);
-}
-
-function claudeLeftoverRegistryKeys() {
-  return [
-    "HKCU\\SOFTWARE\\Policies\\Claude",
-    "HKCU\\Software\\Classes\\claude",
-    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AnthropicClaude",
-  ];
-}
-
-function planRemoval({ installed, version, installKind, env = process.env } = {}) {
-  const remove = [
-    ...(installed ? [{
-      path: installKind === "squirrel" ? "Claude Desktop (Update.exe --uninstall)" : `Claude Desktop paketi${version ? ` (${version})` : ""}`,
-      reason: "Uygulamanın kendisi",
-    }] : []),
-    ...claudeLeftoverDirectories(env).map((target) => ({
-      path: target,
-      reason: "Claude Desktop ayarları, önbelleği ve oturum verisi",
-      exists: fs.existsSync(target),
-    })),
-    ...claudeLeftoverRegistryKeys().map((key) => ({ path: key, reason: "Claude Desktop kayıt defteri girdisi" })),
-  ];
-  return {
-    destructive: true,
-    installed: !!installed,
-    remove: remove.filter((item) => item.exists !== false),
-    preserve: [
-      ...preservedDirectories(env).map((target) => ({ path: target, reason: "Claude Code CLI'ye ait — Claude Desktop ile silinmez" })),
-      { path: "Cizi Code ayarları", reason: "Anahtar kapatıldığında orijinal ayarlarınız zaten geri yüklenir" },
-    ],
-    packageFamily: CLAUDE_PACKAGE_FAMILY,
-  };
 }
 
 // Only Anthropic's own uninstaller is ever executed. A registry uninstall
@@ -369,14 +288,13 @@ function removeMsixScript() {
   ].join("\n");
 }
 
-// Clears what the package removal leaves behind. Every path is one this module
-// listed in the removal plan, and ~/.claude is never among them.
-function removeLeftoversScript() {
+// The part of a removal that cannot be done by deleting files: registry keys,
+// autostart entries and shortcuts. Kept separate from the directory sweep so a
+// category-based removal can clear these without also deleting data the user
+// asked to keep.
+function removeResidueScript() {
   return [
     "$ErrorActionPreference='Continue'",
-    `$family='${CLAUDE_PACKAGE_FAMILY}'`,
-    "$dirs=@((Join-Path $env:LOCALAPPDATA 'AnthropicClaude'),(Join-Path $env:LOCALAPPDATA 'Claude'),(Join-Path $env:LOCALAPPDATA 'Claude-3p'),(Join-Path $env:LOCALAPPDATA 'Programs\\Claude'),(Join-Path $env:LOCALAPPDATA ('Packages\\'+$family)),(Join-Path $env:APPDATA 'Claude'),(Join-Path $env:APPDATA 'AnthropicClaude'))",
-    "foreach($dir in $dirs){if($dir -and (Test-Path -LiteralPath $dir)){Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue}}",
     "$keys=@('HKCU:\\SOFTWARE\\Policies\\Claude','HKCU:\\Software\\Classes\\claude','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AnthropicClaude')",
     "foreach($key in $keys){if(Test-Path -LiteralPath $key){Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue}}",
     // Only Run entries that actually point at Claude Desktop are removed; a
@@ -388,30 +306,36 @@ function removeLeftoversScript() {
   ].join("\n");
 }
 
+// Clears everything the package removal leaves behind: the directories this
+// module listed in the removal plan, then the residue above. ~/.claude is never
+// among them - that is the other product's.
+function removeLeftoversScript() {
+  return [
+    "$ErrorActionPreference='Continue'",
+    `$family='${CLAUDE_PACKAGE_FAMILY}'`,
+    "$dirs=@((Join-Path $env:LOCALAPPDATA 'AnthropicClaude'),(Join-Path $env:LOCALAPPDATA 'Claude'),(Join-Path $env:LOCALAPPDATA 'Claude-3p'),(Join-Path $env:LOCALAPPDATA 'Programs\\Claude'),(Join-Path $env:LOCALAPPDATA ('Packages\\'+$family)),(Join-Path $env:APPDATA 'Claude'),(Join-Path $env:APPDATA 'AnthropicClaude'))",
+    "foreach($dir in $dirs){if($dir -and (Test-Path -LiteralPath $dir)){Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue}}",
+    removeResidueScript(),
+  ].join("\n");
+}
+
 module.exports = {
   ALLOWED_INSTALLER_HOSTS,
   MAX_INSTALLER_BYTES,
   CLAUDE_PACKAGE_FAMILY,
-  INSTALLER_URLS,
-  INSTALL_KINDS,
   installerFailure,
   runPowerShell,
-  assertInstallKind,
   assertInstallerUrl,
-  resolveInstallSource,
   requestHeaders,
   responseDetails,
   assertResponseSize,
   assertArtifactResponse,
-  assertLocalArtifact,
   inspectDownload,
   downloadInstaller,
   verifyAnthropicSignature,
   claudeLeftoverDirectories,
-  preservedDirectories,
-  claudeLeftoverRegistryKeys,
-  planRemoval,
   parseTrustedUninstallCommand,
   removeMsixScript,
+  removeResidueScript,
   removeLeftoversScript,
 };

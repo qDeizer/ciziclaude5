@@ -16,7 +16,7 @@ const LONG_RENDERER_ACTIONS = new Set([
   "claude-desktop.install", "claude-desktop.purge",
   "codex-cli.install", "codex-cli.purge",
   "codex-desktop.install", "codex-desktop.purge",
-  "tool.reconcile-all", "tool.claude.switch",
+  "tool.reconcile-all", "tool.claude-code.switch", "tool.claude-desktop.switch", "tool.codex.switch",
 ]);
 
 function safeJson(value) {

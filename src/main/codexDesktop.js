@@ -15,6 +15,7 @@ const paths = require("./codexPaths");
 
 const execFileAsync = promisify(execFile);
 const INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
+const PACKAGE_REGISTRATION_POLL_MS = 3000;
 const PS_ARGS = ["-NoProfile", "-NonInteractive", "-Command"];
 
 function sanitizeOutput(value) {
@@ -143,13 +144,6 @@ async function openDesktop({ log } = {}) {
   return { opened: true, activation: desktop.activation };
 }
 
-async function restartDesktop({ log } = {}) {
-  const closed = await closeDesktop({ log });
-  await new Promise((resolve) => setTimeout(resolve, 1200));
-  const opened = await openDesktop({ log });
-  return { ...closed, ...opened };
-}
-
 function removePath(target) {
   try {
     if (!fs.existsSync(target)) return { path: target, removed: false, reason: "not-found" };
@@ -192,7 +186,114 @@ function parsePhase(line) {
   return null;
 }
 
-function createCodexDesktopService({ userDataPath, log, onInstallState, detect = detectCodexDesktop }) {
+function runWinget(storeId, startedAt, {
+  detect,
+  onPackageRegistered,
+  onProgress = () => {},
+  spawnProcess = spawn,
+  timeoutMs = INSTALL_TIMEOUT_MS,
+  registrationPollMs = PACKAGE_REGISTRATION_POLL_MS,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "install",
+      "--id", storeId,
+      "--source", "msstore",
+      "--accept-package-agreements",
+      "--accept-source-agreements",
+      "--disable-interactivity",
+    ];
+    const child = spawnProcess("winget.exe", args, {
+      cwd: os.homedir(),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    let lastDetail = "";
+    // winget can wait for Store/App Installer cleanup after Windows has already
+    // registered the package. Package registration is the authoritative result
+    // users need, so do not leave the UI spinning solely for that child to exit.
+    let phase = null;
+    let settled = false;
+    let probingRegistration = false;
+    let registrationWatcher = null;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(heartbeat);
+      clearInterval(registrationWatcher);
+      if (error) reject(error);
+      else resolve({ lastDetail, ...(result || {}) });
+    };
+
+    const detachAfterRegistration = () => {
+      // Do not kill winget after the package is visible: it may only be doing
+      // Store cleanup. Disconnecting it prevents that background cleanup from
+      // keeping Cizi Code alive or its progress strip stuck.
+      try { child.stdout?.destroy(); } catch { /* best effort */ }
+      try { child.stderr?.destroy(); } catch { /* best effort */ }
+      try { child.unref?.(); } catch { /* best effort */ }
+    };
+
+    const probeRegistration = async () => {
+      if (settled || probingRegistration || typeof detect !== "function") return;
+      probingRegistration = true;
+      try {
+        const installed = await detect();
+        if (!installed?.installed) return;
+        onPackageRegistered?.(installed);
+        detachAfterRegistration();
+        finish(null, { installed, completedBy: "package-registration" });
+      } catch {
+        // A transient AppX query failure must not turn a still-running official
+        // installer into an error. The normal completion path remains active.
+      } finally {
+        probingRegistration = false;
+      }
+    };
+
+    const timer = setTimeout(() => {
+      try { execFile("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => {}); } catch { /* best effort */ }
+      finish(new Error("Microsoft Store kurulumu zaman aşımına uğradı."));
+    }, timeoutMs);
+
+    // Store installs can stay silent for long stretches; the elapsed clock is
+    // what tells the user the process is still alive.
+    const heartbeat = setInterval(() => {
+      const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      onProgress({ type: "heartbeat", elapsed, detail: lastDetail });
+    }, 1000);
+    registrationWatcher = setInterval(() => { void probeRegistration(); }, registrationPollMs);
+
+    const onChunk = (chunk) => {
+      // winget redraws its progress bar with carriage returns.
+      const parts = String(chunk).split(/[\r\n]+/).map((item) => item.trim()).filter(Boolean);
+      for (const part of parts) {
+        const detail = sanitizeOutput(part);
+        if (!detail) continue;
+        const progress = parseProgress(part);
+        const named = parsePhase(part);
+        if (named) phase = named;
+        lastDetail = progress?.total
+          ? `${detail} (${formatBytes(progress.received)} / ${formatBytes(progress.total)})`
+          : detail;
+        const id = phase === "download" ? "download" : "install";
+        onProgress({ type: "output", id, phase, named, progress, detail: lastDetail });
+      }
+    };
+
+    child.stdout?.on("data", onChunk);
+    child.stderr?.on("data", onChunk);
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code) => {
+      if (code === 0) finish();
+      else finish(new Error(`Microsoft Store kurulumu ${code} çıkış koduyla bitti.`));
+    });
+  });
+}
+
+function createCodexDesktopService({ userDataPath, log, onInstallState, detect = detectCodexDesktop, runWingetProcess = runWinget }) {
   let installPromise = null;
   // `null` percent means "running but not measurable" and is rendered as an
   // indeterminate bar, which is honest about Store installs that report no
@@ -265,89 +366,6 @@ function createCodexDesktopService({ userDataPath, log, onInstallState, detect =
     return "ChatGPT Desktop kurulamadı. Kurulum etkinliğindeki ayrıntılara bakın.";
   };
 
-  const runWinget = (storeId, startedAt) => new Promise((resolve, reject) => {
-    const args = [
-      "install",
-      "--id", storeId,
-      "--source", "msstore",
-      "--accept-package-agreements",
-      "--accept-source-agreements",
-      "--disable-interactivity",
-    ];
-    const child = spawn("winget.exe", args, {
-      cwd: os.homedir(),
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-
-    let lastDetail = "";
-    // winget names a phase once ("Downloading...") and then redraws a bare
-    // progress bar, so the last named phase is remembered and the byte counts
-    // that follow keep updating that same step instead of jumping to another.
-    let phase = null;
-    let settled = false;
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      clearInterval(heartbeat);
-      if (error) reject(error);
-      else resolve({ lastDetail });
-    };
-
-    const timer = setTimeout(() => {
-      try { execFile("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => {}); } catch { /* best effort */ }
-      finish(new Error("Microsoft Store kurulumu zaman aşımına uğradı."));
-    }, INSTALL_TIMEOUT_MS);
-
-    // Store installs can stay silent for long stretches; the elapsed clock is
-    // what tells the user the process is still alive.
-    const heartbeat = setInterval(() => {
-      const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-      operation("install", { detail: lastDetail || `Microsoft Store kurulumu sürüyor (${elapsed} sn).` });
-      emit({ message: lastDetail || `Microsoft Store kurulumu sürüyor (${elapsed} sn).` });
-    }, 1000);
-
-    const onChunk = (chunk) => {
-      // winget redraws its progress bar with carriage returns.
-      const parts = String(chunk).split(/[\r\n]+/).map((item) => item.trim()).filter(Boolean);
-      for (const part of parts) {
-        const detail = sanitizeOutput(part);
-        if (!detail) continue;
-        const progress = parseProgress(part);
-        const named = parsePhase(part);
-        if (named) phase = named;
-        lastDetail = progress?.total
-          ? `${detail} (${formatBytes(progress.received)} / ${formatBytes(progress.total)})`
-          : detail;
-        const id = phase === "download" ? "download" : "install";
-        if (id === "download") {
-          operation("download", { label: "Microsoft Store'dan indir", status: "running" });
-        } else if (named === "install") {
-          // Reaching the install step means any download step is finished.
-          operation("download", { status: "done", percent: 100 });
-        }
-        operation(id, {
-          detail: lastDetail,
-          ...(progress?.percent == null ? {} : { percent: progress.percent }),
-        });
-        emit({
-          ...(phase ? { phase } : {}),
-          ...(progress?.percent == null ? {} : { percent: progress.percent }),
-          message: lastDetail,
-        });
-      }
-    };
-
-    child.stdout?.on("data", onChunk);
-    child.stderr?.on("data", onChunk);
-    child.once("error", (error) => finish(error));
-    child.once("exit", (code) => {
-      if (code === 0) finish();
-      else finish(new Error(`Microsoft Store kurulumu ${code} çıkış koduyla bitti.`));
-    });
-  });
-
   const install = async () => {
     if (installPromise) return installPromise;
     installPromise = (async () => {
@@ -368,12 +386,45 @@ function createCodexDesktopService({ userDataPath, log, onInstallState, detect =
         operation("install", { label: "Microsoft Store'dan kur", status: "running", percent: null, detail: "Resmî Microsoft Store kurulumu başlatılıyor..." });
         emit({ status: "installing", phase: "install", percent: null, message: "Resmî Microsoft Store kurulumu başlatılıyor..." });
         log?.info("codex-desktop", "Resmî Microsoft Store kurulumu başlatıldı", { storeId: desktop.storeId });
-        await runWinget(desktop.storeId, Date.now());
+        const wingetResult = await runWingetProcess(desktop.storeId, Date.now(), {
+          detect,
+          onProgress: ({ type, elapsed, detail, id, phase, named, progress }) => {
+            if (type === "heartbeat") {
+              const message = detail || `Microsoft Store kurulumu sürüyor (${elapsed} sn).`;
+              operation("install", { detail: message });
+              emit({ message });
+              return;
+            }
+            if (id === "download") {
+              operation("download", { label: "Microsoft Store'dan indir", status: "running" });
+            } else if (named === "install") {
+              // Reaching the install step means any download step is finished.
+              operation("download", { status: "done", percent: 100 });
+            }
+            operation(id, {
+              detail,
+              ...(progress?.percent == null ? {} : { percent: progress.percent }),
+            });
+            emit({
+              ...(phase ? { phase } : {}),
+              ...(progress?.percent == null ? {} : { percent: progress.percent }),
+              message: detail,
+            });
+          },
+          onPackageRegistered: (registered) => {
+            operation("install", { status: "done", percent: 100, detail: "Windows paket kaydını tamamladı." });
+            emit({ status: "verifying", phase: "verify", percent: null, message: "ChatGPT Desktop bulundu; kurulum doğrulanıyor..." });
+            log?.success("codex-desktop", "Windows paket kaydı algılandı; winget kapanışı beklenmeden kurulum tamamlanıyor", {
+              version: registered.version || null,
+              packageFullName: registered.packageFullName || null,
+            });
+          },
+        });
         operation("install", { status: "done", percent: 100, detail: "Microsoft Store kurulumu tamamlandı." });
 
         operation("verify", { label: "Kurulumu doğrula", status: "running", percent: null, detail: "Uygulama paketi kontrol ediliyor..." });
         emit({ status: "verifying", phase: "verify", percent: null, message: "Kurulum doğrulanıyor..." });
-        const installed = await detect();
+        const installed = wingetResult?.installed || await detect();
         if (!installed.installed) throw new Error("Kurulum bitti ama ChatGPT Desktop doğrulanamadı.");
         operation("verify", { status: "done", percent: 100, detail: `${installed.version || ""} ${installed.packageFullName || ""}`.trim() });
         emit({ status: "installed", phase: "complete", percent: 100, message: "ChatGPT Desktop kuruldu.", ...installed });
@@ -395,72 +446,28 @@ function createCodexDesktopService({ userDataPath, log, onInstallState, detect =
     return installPromise;
   };
 
-  // What a removal would touch, given what else is installed. Surfaced to the
-  // user before anything is deleted.
-  const planUninstall = async ({ cliInstalled }) => {
-    const status = await detect();
-    const plan = paths.planRemoval({ target: "desktop", otherInstalled: cliInstalled !== false });
-    return { ...plan, desktop: status };
-  };
-
-  const uninstall = async ({ cliInstalled, removeShared = false } = {}) => {
+  // Removes the application and nothing else. What happens to the data it
+  // leaves behind is decided by the removal categories the user selected, so
+  // this deliberately deletes no files: sweeping the state directory here would
+  // silently override a category the user chose to keep.
+  const removePackage = async () => {
     const desktop = paths.desktopPaths();
     const before = await detect();
-    const keepShared = cliInstalled !== false;
-    // Shared Codex data is only ever cleared when no other Codex product is
-    // installed AND the caller explicitly opted in.
-    const clearShared = !keepShared && removeShared === true;
-
+    if (!before.installed) return { removed: false, reason: "not-installed" };
     const closed = await closeDesktop({ log });
-    let packageRemoval = { removed: false, reason: "not-installed" };
-    if (before.installed) {
-      try {
-        await powershell(
-          `Get-AppxPackage -Name '${desktop.packageName}' | Remove-AppxPackage -ErrorAction Stop`,
-          { timeout: 180000 }
-        );
-        packageRemoval = { removed: true };
-      } catch (error) {
-        packageRemoval = { removed: false, error: sanitizeOutput(error?.message) };
-      }
+    try {
+      await powershell(
+        `Get-AppxPackage -Name '${desktop.packageName}' | Remove-AppxPackage -ErrorAction Stop`,
+        { timeout: 180000 }
+      );
+    } catch (error) {
+      return { removed: false, error: sanitizeOutput(error?.message), closedProcesses: closed };
     }
-
     const after = await detect();
-    const targets = [desktop.packageStateDir, desktop.runtimeDir];
-    if (clearShared) targets.push(paths.sharedPaths().root);
-    // Leftover state is only cleared once Windows no longer reports the
-    // package; deleting it while registered would corrupt the installation.
-    const results = after.installed ? [] : targets.map(removePath);
-
-    const preserved = [];
-    if (keepShared) {
-      const cli = paths.cliPaths();
-      preserved.push(paths.sharedPaths().root, cli.programDir, cli.standaloneDir);
-    } else if (!clearShared) {
-      preserved.push(paths.sharedPaths().root);
-    }
-
-    const stillExists = targets.filter((item) => paths.exists(item));
-    const ok = !after.installed && stillExists.length === 0;
-    log?.info("codex-desktop", ok ? "ChatGPT Desktop kökten kaldırıldı" : "ChatGPT Desktop kaldırma kısmen tamamlandı", {
-      packageRemoved: packageRemoval.removed,
-      cleared: results.filter((item) => item.removed).length,
-      remaining: stillExists.length,
-      sharedCleared: clearShared,
-    });
-
-    return {
-      ok,
-      before,
-      after,
-      closedProcesses: closed,
-      package: packageRemoval,
-      removed: results.filter((item) => item.removed).map((item) => item.path),
-      failed: results.filter((item) => item.error),
-      stillExists,
-      sharedCleared: clearShared,
-      preserved: preserved.filter((item) => paths.exists(item)),
-    };
+    log?.info("codex-desktop", after.installed
+      ? "ChatGPT Desktop paketi hâlâ kayıtlı"
+      : "ChatGPT Desktop paketi kaldırıldı");
+    return { removed: !after.installed, closedProcesses: closed, version: before.version || null };
   };
 
   return {
@@ -468,10 +475,7 @@ function createCodexDesktopService({ userDataPath, log, onInstallState, detect =
     install,
     open: (options) => openDesktop({ ...options, log }),
     close: () => closeDesktop({ log }),
-    restart: () => restartDesktop({ log }),
-    planUninstall,
-    uninstall,
-    getInstallState: () => installState,
+    removePackage,
     storeUrl: paths.DESKTOP_STORE_URL,
   };
 }
@@ -481,8 +485,8 @@ module.exports = {
   detectCodexDesktop,
   closeDesktop,
   openDesktop,
-  restartDesktop,
   listDesktopProcesses,
   parseProgress,
   parsePhase,
+  runWinget,
 };

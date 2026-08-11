@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="tr">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,96 +8,91 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <section id="login-view" class="view">
+  <section id="login-view" class="view login-view">
     <div class="login-card">
       <div class="brand">
         <img class="brand-mark" src="../../assets/logo.png" alt="" />
         <div>
           <h1>Cizi Code</h1>
-          <p class="muted">Connect your coding tools with one switch</p>
+          <p class="muted">Kodlama araçlarınızı tek anahtarla bağlayın</p>
         </div>
       </div>
-      <label>API Key</label>
+      <label for="login-key">API Anahtarı</label>
       <input id="login-key" data-cli-id="login-key" type="password" placeholder="sk-cizi-..." autocomplete="off" />
-      <button id="login-btn" data-cli-id="login-btn" class="primary">Sign In</button>
+      <button id="login-btn" data-cli-id="login-btn" class="primary block">Giriş Yap</button>
       <p id="login-error" class="error hidden"></p>
-      <p class="muted tiny">Cizi Code account access</p>
+      <p class="muted tiny">Cizi Code hesabınızla giriş yapılır.</p>
     </div>
   </section>
 
   <section id="dash-view" class="view hidden">
     <header class="topbar">
-      <div class="brand small">
+      <div class="brand compact">
         <img class="brand-mark" src="../../assets/logo.png" alt="" />
-        <span>Cizi Code</span>
+        <span class="brand-name">Cizi Code</span>
       </div>
-      <div class="topbar-right">
-        <span id="conn-status" class="status-dot">Connected</span>
-        <span id="conn-base" class="muted tiny">Cizi Code Cloud</span>
-        <button id="update-check" data-cli-id="update-check" class="ghost">Check Updates</button>
-        <button id="logout-btn" data-cli-id="logout-btn" class="ghost">Sign Out</button>
+      <span id="conn-base" class="gateway-chip">Cizi Code Cloud</span>
+
+      <div class="topbar-spacer"></div>
+
+      <!-- Kalan kullanım artık dikey yer kaplayan bir halka değil: ekranın asıl
+           konusu bağlantı kartları, kullanım ise tek bakışta okunan bir şerit. -->
+      <div class="meter" id="quota-meter" title="Kalan kullanım hakkınız">
+        <span class="meter-label">Kalan</span>
+        <span class="meter-track"><span id="quota-fill" class="meter-fill"></span></span>
+        <span id="quota-pct" class="meter-value">--%</span>
       </div>
+
+      <button id="usage-refresh" data-cli-id="usage-refresh" class="ghost icon-btn" title="Hesap ve kullanım bilgilerini yenile">Yenile</button>
+      <button id="update-check" data-cli-id="update-check" class="ghost icon-btn" title="Cizi Code güncellemesi var mı">Güncelleme</button>
+      <button id="logout-btn" data-cli-id="logout-btn" class="ghost icon-btn">Çıkış</button>
     </header>
 
-    <div id="update-banner" class="update-banner hidden">
+    <div id="update-banner" class="banner hidden">
       <span id="update-message"></span>
-      <button id="update-install" data-cli-id="update-install" class="ghost tiny-btn hidden">Restart & Install</button>
+      <button id="update-install" data-cli-id="update-install" class="primary tiny-btn hidden">Yeniden Başlat ve Kur</button>
     </div>
 
+    <p id="limit-msg" class="banner bad hidden"></p>
+
     <main class="content">
-      <div class="grid">
-        <div class="card quota-card">
-          <div class="card-head quota-head">
-            <h3>Remaining Usage</h3>
-            <button id="usage-refresh" data-cli-id="usage-refresh" class="ghost tiny-btn" title="Refresh usage">Refresh</button>
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Bağlantılar</h2>
+            <p class="panel-note" id="tools-note">Anahtarı açtığınızda ayarlarınızın yedeği alınır; kapattığınızda birebir geri yüklenir.</p>
           </div>
-          <div class="quota-ring-wrap">
-            <svg id="quota-ring" viewBox="0 0 120 120" width="120" height="120">
-              <circle cx="60" cy="60" r="52" class="ring-bg"></circle>
-              <circle id="ring-fg" cx="60" cy="60" r="52" class="ring-fg"></circle>
-            </svg>
-            <div class="quota-percent"><span id="quota-pct">--</span><small>%</small></div>
+          <button id="tool-reconcile-all" data-cli-id="tool.reconcile-all" data-cli-await="long" data-cli-await-timeout="120000" class="ghost tiny-btn" title="Her bağlantıyı gerçek ayar dosyalarıyla karşılaştırır ve eksikleri tamamlar">Bağlantıları doğrula</button>
+        </div>
+        <div id="tools-list" class="cards"></div>
+      </section>
+
+      <section class="panel split-panel">
+        <div class="subpanel">
+          <div class="panel-head tight">
+            <h3>Kullanılabilir Modeller</h3>
           </div>
-          <p id="quota-note" class="muted tiny">Your usage is shown as a percentage only.</p>
-          <p id="usage-updated" class="muted tiny">Not refreshed yet</p>
-          <p id="limit-msg" class="error hidden"></p>
+          <div id="model-chips" class="chips"></div>
         </div>
 
-        <div class="card graph-card">
-          <div class="card-head">
-            <h3>Usage Trend</h3>
-            <select id="period-select" data-cli-id="period-select" class="select">
-              <option value="today">Today</option>
-              <option value="7d">7 Days</option>
-              <option value="30d" selected>30 Days</option>
-              <option value="60d">60 Days</option>
+        <div class="subpanel">
+          <div class="panel-head tight">
+            <h3>Kullanım Eğilimi</h3>
+            <select id="period-select" data-cli-id="period-select" class="select" aria-label="Dönem">
+              <option value="today">Bugün</option>
+              <option value="7d">7 Gün</option>
+              <option value="30d" selected>30 Gün</option>
+              <option value="60d">60 Gün</option>
             </select>
           </div>
-          <canvas id="usage-chart" height="180"></canvas>
-          <p class="muted tiny">Trend bars are normalized. Exact usage values are not displayed.</p>
+          <canvas id="usage-chart" height="150"></canvas>
+          <p class="muted tiny" id="usage-updated">Henüz yenilenmedi</p>
         </div>
-      </div>
-
-      <div class="card">
-        <h3>Available Models</h3>
-        <div id="model-chips" class="chips"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-head">
-          <h3>Tool Configuration</h3>
-          <button id="tool-reconcile-all" data-cli-id="tool.reconcile-all" data-cli-await="long" data-cli-await-timeout="120000" class="ghost tiny-btn" title="Tüm bağlantıları gerçek ayar dosyalarıyla karşılaştır">Bağlantıları doğrula</button>
-        </div>
-        <div id="tools-list" class="tools"></div>
-        <div id="claude-cli-install-activity" class="cli-install-activity hidden" aria-live="polite"></div>
-        <div id="claude-desktop-install-activity" class="cli-install-activity hidden" aria-live="polite"></div>
-        <div id="codex-cli-install-activity" class="cli-install-activity hidden" aria-live="polite"></div>
-        <div id="codex-desktop-install-activity" class="cli-install-activity hidden" aria-live="polite"></div>
-      </div>
+      </section>
     </main>
   </section>
 
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   <script src="cliUi.js"></script>
   <script src="modelFamilies.js"></script>
   <script src="modelCapabilities.js"></script>

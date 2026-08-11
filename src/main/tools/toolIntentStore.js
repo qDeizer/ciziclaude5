@@ -52,6 +52,10 @@ function get(toolId, options = {}) {
     enabled: entry.enabled,
     values: safeValues(entry.values),
     updatedAt: entry.updatedAt || null,
+    // "The machine was last seen matching this intent." Only ever written after a
+    // verified apply or a verified restore, so the periodic check can skip a
+    // switch that has nothing to do instead of scanning for it every few minutes.
+    settled: entry.settled === true,
   };
 }
 
@@ -65,9 +69,33 @@ function set(toolId, enabled, values = null, options = {}) {
     enabled: enabled === true,
     values: nextValues,
     updatedAt: new Date().toISOString(),
+    // A new intent is unsettled by definition: what the machine looks like has
+    // not been proven against it yet. Anything else would let the check skip work
+    // that still has to happen.
+    settled: false,
   };
   writeState(state, options);
   return get(id, options);
 }
 
-module.exports = { SCHEMA_VERSION, statePath, readState, safeValues, get, set };
+// Recorded only where the outcome was actually verified. Kept separate from
+// `set` so it can never be claimed as a side effect of writing an intent.
+function markSettled(toolId, options = {}) {
+  const id = String(toolId || "").trim();
+  const state = readState(options);
+  if (!id || !state.tools[id]) return null;
+  state.tools[id] = { ...state.tools[id], settled: true };
+  writeState(state, options);
+  return get(id, options);
+}
+
+function remove(toolId, options = {}) {
+  const id = String(toolId || "").trim();
+  const state = readState(options);
+  if (!id || !state.tools[id]) return false;
+  delete state.tools[id];
+  writeState(state, options);
+  return true;
+}
+
+module.exports = { SCHEMA_VERSION, statePath, readState, safeValues, get, set, markSettled, remove };

@@ -70,13 +70,6 @@ function assertMainPackagePreserved(before, afterStatus, operation) {
   return after;
 }
 
-function isMainClaudePackage(candidate) {
-  const family = safeString(candidate?.packageFamilyName || candidate?.PackageFamilyName);
-  const fullName = safeString(candidate?.packageFullName || candidate?.PackageFullName);
-  return family === CLAUDE_MAIN_PACKAGE_FAMILY
-    || new RegExp(`^${CLAUDE_MAIN_PACKAGE_NAME}_[^_]+_[^_]+__pzs8sxrjxfjjc$`, "i").test(fullName);
-}
-
 module.exports = {
   CLAUDE_MAIN_PACKAGE_NAME,
   CLAUDE_MAIN_PACKAGE_FAMILY,
@@ -84,5 +77,4 @@ module.exports = {
   mainPackageIdentity,
   sameMainPackage,
   assertMainPackagePreserved,
-  isMainClaudePackage,
 };

@@ -148,6 +148,62 @@ function createApplyService({ logger, powershell, elevation, claudeProcess, lock
     return { restored: !failed.length, files: restored, failed };
   }
 
+  // Canli dosya GERCEKTEN bozuk mu?
+  //
+  // Ayrim onemli: icerigi degismis ama GECERLI bir dosya, Anthropic'in kendi
+  // degisikligi olabilir - onu yedekten geri yazmak bir guncellemeyi geri almak
+  // olur. Bos ya da ayristirilamayan bir dosya ise kimsenin isteyecegi bir sey
+  // degildir; yalnizca yarim yazma, kesilmis kopyalama ya da disk hatasi boyle
+  // gorunur.
+  function liveFileCorruption(livePath) {
+    let stat;
+    try { stat = fs.statSync(livePath); } catch { return "unreadable"; }
+    if (stat.size === 0) return "empty";
+    if (!livePath.toLowerCase().endsWith(".json")) return null;
+    try {
+      JSON.parse(fs.readFileSync(livePath, "utf8").replace(/^﻿/, ""));
+      return null;
+    } catch {
+      return "invalid-json";
+    }
+  }
+
+  // Bozuk hedefi kendi yedegimizden geri getirir.
+  //
+  // NEDEN GEREKLI: canli dosyaya yazma atomik DEGIL - gecici dosya + rename
+  // yapmak, TrustedInstaller'a ait dizin uzerinde de yetki almayi gerektirirdi,
+  // ki bu paketin sertlestirmesini gereksiz yere daha genis acardi. Bunun bedeli
+  // sudur: surec tam yazma anininda olurse dosya yarim kalir. Boyle bir dosya
+  // eskiden `LIVE_FILE_DRIFTED` ile cikmaz sokaga giriyordu - ne yamalanabiliyor
+  // ne de kendiliginden duzeliyordu, cunku hicbir yol onu yedekten geri koymuyordu.
+  async function recoverCorruptLiveFile(packageInfo, file, reason) {
+    const manifestPath = backupManifestPath(packageInfo.version);
+    if (!fs.existsSync(manifestPath)) return false;
+    let manifest;
+    try { manifest = readJson(manifestPath); } catch { return false; }
+    if (manifest.packageFullName && manifest.packageFullName !== packageInfo.packageFullName) return false;
+    const entry = (manifest.files || []).find((item) => item.relativePath === file.relativePath);
+    // Yedegin gercekten BU build'in kaynagi oldugu kanitlanmadan geri yazilmaz.
+    if (!entry || entry.sha256 !== file.sourceSha256 || !fs.existsSync(entry.backupPath)) return false;
+    if (sha256File(entry.backupPath) !== file.sourceSha256) return false;
+
+    const livePath = path.join(packageInfo.installLocation, file.relativePath.split("/").join(path.sep));
+    try {
+      await grantWrite(livePath, packageInfo);
+      fs.copyFileSync(entry.backupPath, livePath);
+      if (sha256File(livePath) !== file.sourceSha256) return false;
+      logger.success("apply", "Bozulmus hedef dosya yedekten geri getirildi", {
+        file: file.relativePath, reason,
+      });
+      return true;
+    } catch (cause) {
+      logger.error("apply", "Bozulmus hedef dosya geri getirilemedi", {
+        file: file.relativePath, reason, error: String(cause?.message || cause),
+      });
+      return false;
+    }
+  }
+
   async function assertPreconditions(packageInfo, provenance) {
     if (provenance.source.packageFullName !== packageInfo.packageFullName) {
       throw codedError(
@@ -170,10 +226,20 @@ function createApplyService({ logger, powershell, elevation, claudeProcess, lock
         throw codedError("ALREADY_PATCHED", `Dosya zaten yamali: ${file.relativePath}`);
       }
       if (liveSha !== file.sourceSha256) {
-        throw codedError(
-          "LIVE_FILE_DRIFTED",
-          `Hedef dosya build sirasindakinden farkli (${file.relativePath}). Yeniden build gerekiyor.`,
-        );
+        // Bozuksa kendi yedegimizden geri getirilir; degismis ama gecerliyse
+        // dokunulmaz ve yeniden build istenir.
+        const corruption = liveFileCorruption(livePath);
+        const recovered = corruption
+          ? await recoverCorruptLiveFile(packageInfo, file, corruption)
+          : false;
+        if (!recovered) {
+          throw codedError(
+            "LIVE_FILE_DRIFTED",
+            corruption
+              ? `Hedef dosya bozuk (${file.relativePath}: ${corruption}) ve yedekten geri getirilemedi.`
+              : `Hedef dosya build sirasindakinden farkli (${file.relativePath}). Yeniden build gerekiyor.`,
+          );
+        }
       }
     }
   }
@@ -288,10 +354,23 @@ function createApplyService({ logger, powershell, elevation, claudeProcess, lock
     if (needsProtectionBypass(packageInfo)) {
       await elevation.assertElevated("Orijinal Claude dosyalarini geri yuklemek");
     }
-    await assertTargetNotInUse(packageInfo);
     const held = await lock.acquire();
     try {
+      // Kullanimda mi kontrolu KILIDIN ICINDE: disarida yapildiginda kontrol ile
+      // yazma arasinda Claude baslayabiliyordu ve yazma calisan bir kuruluma
+      // gidiyordu.
+      await assertTargetNotInUse(packageInfo);
       const manifest = readJson(backupManifestPath(packageInfo.version));
+      // Yedek, kurulu paketin yedegi mi? Surum dizesi ayni kalirken paket
+      // degismis olabilir (yeniden kurulum, farkli mimari). Baska bir paketin
+      // baytlarini geri yazmak, duzeltmek istedigimiz seyi bozmak olurdu.
+      if (manifest.packageFullName && manifest.packageFullName !== packageInfo.packageFullName) {
+        logger.warning("apply", "Yedek baska bir Claude paketine ait; geri yukleme yapilmadi", {
+          backupPackage: manifest.packageFullName,
+          installedPackage: packageInfo.packageFullName,
+        });
+        return { restored: false, reason: "BACKUP_PACKAGE_MISMATCH", files: [] };
+      }
       for (const entry of manifest.files) {
         const livePath = path.join(packageInfo.installLocation, entry.relativePath.split("/").join(path.sep));
         await grantWrite(livePath, packageInfo);

@@ -1,6 +1,5 @@
 const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
-const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -9,14 +8,12 @@ const {
   CLAUDE_DESKTOP_MSIX_URL,
   installerFailure,
   installerStageFailure,
-  claudeCodeWingetPrerequisiteScript,
-  claudeCodeWingetInstallScript,
-  cliWingetPrerequisiteFailure,
   claudeDesktopInstallScript,
   claudeDesktopInstallFailure,
 } = require("./claudeInstallerContract");
 // Claude Desktop's own download/verify/remove layer, ported from ciziClaude4.
 const installer = require("./claudeDesktopInstaller");
+const { manualInstallDirectory } = require("../manualInstall");
 const { assertArtifactResponse } = installer;
 
 const execFileAsync = promisify(execFile);
@@ -131,10 +128,10 @@ function runPowerShellWithHeartbeat(script, options = {}, {
   heartbeatPath,
   onHeartbeat = () => {},
   pollIntervalMs = 500,
-  timeoutCode = "CLAUDE_CODE_INSTALL_TIMEOUT",
-  timeoutMessage = "Claude Code installation timed out. Check your npm/network setup and try again.",
-  failureCode = "CLAUDE_CODE_INSTALL_COMMAND_FAILED",
-  failureMessage = "Claude Code installation stopped before it finished. Check npm and try again.",
+  timeoutCode = "CLAUDE_DESKTOP_INSTALL_TIMEOUT",
+  timeoutMessage = "The installation timed out. Check your connection and try again.",
+  failureCode = "CLAUDE_DESKTOP_INSTALL_FAILED",
+  failureMessage = "The installation stopped before it finished. Try again.",
 } = {}) {
   const { env = {}, timeout = 20 * 60 * 1000 } = options;
   const interval = Math.min(1000, Math.max(150, Number(pollIntervalMs) || 500));
@@ -228,117 +225,6 @@ function isWithinPath(filePath, rootPath) {
   return !!file && !!root && (file === root || file.startsWith(`${root}\\`));
 }
 
-function cliNpmPackagePath() {
-  return path.join(
-    process.env.APPDATA || "",
-    "npm",
-    "node_modules",
-    "@anthropic-ai",
-    "claude-code",
-    "package.json"
-  );
-}
-
-function wingetClaudeCodePackageRoot() {
-  return path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Packages");
-}
-
-function wingetClaudeCodeCandidates() {
-  const root = wingetClaudeCodePackageRoot();
-  const candidates = [];
-  try {
-    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^Anthropic\.ClaudeCode_/i.test(entry.name)) continue;
-      candidates.push(path.join(root, entry.name, "claude.exe"));
-    }
-  } catch {
-    // WinGet is not installed, or Claude Code has never been installed with it.
-  }
-  return candidates;
-}
-
-function isOfficialWingetClaudeCodePath(candidate) {
-  if (!candidate) return false;
-  let resolved;
-  try { resolved = fs.realpathSync.native(candidate); } catch { return false; }
-  const root = wingetClaudeCodePackageRoot();
-  if (!isWithinPath(resolved, root) || path.basename(resolved).toLowerCase() !== "claude.exe") return false;
-  const relative = path.relative(root, resolved).split(path.sep).filter(Boolean);
-  return relative.length >= 2 && /^Anthropic\.ClaudeCode_/i.test(relative[0]);
-}
-
-function hasOfficialNpmClaudeCode() {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(cliNpmPackagePath(), "utf8"));
-    return pkg?.name === "@anthropic-ai/claude-code";
-  } catch {
-    return false;
-  }
-}
-
-function knownClaudeCliPaths() {
-  const home = os.homedir();
-  const npmBin = path.join(process.env.APPDATA || "", "npm");
-  return [
-    path.join(home, ".local", "bin", "claude.exe"),
-    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links", "claude.exe"),
-    ...wingetClaudeCodeCandidates(),
-    path.join(npmBin, "claude.cmd"),
-    path.join(npmBin, "claude.exe"),
-    // Kept for installations produced by an older official installer.
-    path.join(process.env.LOCALAPPDATA || "", "Programs", "Claude", "claude.exe"),
-  ];
-}
-
-function isTrustedClaudeCliPath(candidate) {
-  if (!candidate || /\\Claude-3p\\claude-code\\/i.test(candidate)) return false;
-  if (isOfficialWingetClaudeCodePath(candidate)) return true;
-  const known = knownClaudeCliPaths();
-  const npmBin = path.join(process.env.APPDATA || "", "npm");
-  if (pathsEqual(candidate, path.join(os.homedir(), ".local", "bin", "claude.exe"))) return true;
-  if (pathsEqual(candidate, path.join(process.env.LOCALAPPDATA || "", "Programs", "Claude", "claude.exe"))) return true;
-  // A global npm command is Claude Code only when its actual package is the
-  // official @anthropic-ai/claude-code package. Do not trust an arbitrary
-  // executable named "claude" found on PATH.
-  if (known.some((item) => pathsEqual(candidate, item)) && isWithinPath(candidate, npmBin)) {
-    return hasOfficialNpmClaudeCode();
-  }
-  return false;
-}
-
-function uniqueExisting(candidates) {
-  const seen = new Set();
-  return candidates.filter((candidate) => {
-    const normalized = normalizedPath(candidate);
-    if (!normalized || seen.has(normalized) || !fs.existsSync(candidate)) return false;
-    if (!isTrustedClaudeCliPath(candidate)) return false;
-    seen.add(normalized);
-    return true;
-  });
-}
-
-async function detectClaudeCli() {
-  const candidates = knownClaudeCliPaths();
-  try {
-    const env = {
-      ...process.env,
-      PATH: [path.join(os.homedir(), ".local", "bin"), path.join(process.env.APPDATA || "", "npm"), process.env.PATH || ""].join(path.delimiter),
-    };
-    const result = await execFileAsync("where.exe", ["claude"], { windowsHide: true, timeout: 5000, env });
-    // where.exe is useful for PATH changes made after Cizi Code launched, but
-    // its result is still checked against the official locations above.
-    candidates.push(...String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()));
-  } catch {
-    // Known native/npm paths above are sufficient when where.exe cannot resolve PATH.
-  }
-  const binaries = uniqueExisting(candidates);
-  return {
-    installed: binaries.length > 0,
-    binaries,
-    version: null,
-  };
-}
-
 async function detectClaudeDesktop() {
   const script = [
     "$ErrorActionPreference='Stop'",
@@ -387,39 +273,19 @@ function isOfficialDesktopExecutable(executable, desktopInfo) {
   return /\\windowsapps\\claude_[^\\]*_pzs8sxrjxfjjc\\app\\claude\.exe$/i.test(normalized);
 }
 
-function isClaudeCodeNodeCommand(commandLine) {
-  const command = String(commandLine || "").replace(/\//g, "\\").toLowerCase();
-  // npm's claude.cmd launches node.exe. The package path is the only reliable
-  // discriminator; process name alone must never match arbitrary Node work.
-  return /\\@anthropic-ai\\claude-code(?:\\|\")/.test(command);
-}
-
-function isOfficialClaudeCliExecutable(executable, cliInfo) {
-  if (!executable) return false;
-  const explicitBinaries = Array.isArray(cliInfo?.binaries) ? cliInfo.binaries : [];
-  if (explicitBinaries.some((candidate) => pathsEqual(candidate, executable))) return true;
-  if (pathsEqual(executable, path.join(os.homedir(), ".local", "bin", "claude.exe"))) return true;
-  if (isOfficialWingetClaudeCodePath(executable)) return true;
-  // The native installer may keep versioned binaries under this directory
-  // while the .local\\bin launcher remains the command exposed on PATH.
-  const versionedNativeRoot = path.join(os.homedir(), ".local", "share", "claude");
-  return isWithinPath(executable, versionedNativeRoot)
-    && /\\claude\.exe$/i.test(normalizedPath(executable) || "");
-}
-
 async function listClaudeProcesses(kind, installInfo = null, { runPowerShellFn = runPowerShell } = {}) {
-  if (kind !== "claude-desktop" && kind !== "claude-code") {
+  if (kind !== "claude-desktop") {
     throw new Error(`Unsupported Claude process type: ${kind}`);
   }
 
-  // tasklist.exe reports only image names. In particular, it cannot tell a
-  // Claude Code npm process from an unrelated node.exe process. Query WMI
-  // through System.Management directly, avoiding PowerShell's intermittently
+  // tasklist.exe reports only image names, which cannot distinguish the real
+  // Claude Desktop from any other claude.exe. Query WMI through
+  // System.Management directly, avoiding PowerShell's intermittently
   // unavailable CimCmdlets module, for an immutable identity (PID + executable
   // path + creation time). Termination re-verifies the same identity.
   const script = [
     "$ErrorActionPreference='Stop'",
-    "$searcher=New-Object System.Management.ManagementObjectSearcher(\"SELECT ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate FROM Win32_Process WHERE Name='claude.exe' OR Name='node.exe'\")",
+    "$searcher=New-Object System.Management.ManagementObjectSearcher(\"SELECT ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate FROM Win32_Process WHERE Name='claude.exe'\")",
     "$rows=@($searcher.Get()|ForEach-Object{",
     "$path=[string]$_.ExecutablePath;if([string]::IsNullOrWhiteSpace($path)){try{$path=[string](Get-Process -Id ([int]$_.ProcessId) -ErrorAction Stop).Path}catch{}}",
     "$created=$null;if(-not[string]::IsNullOrWhiteSpace([string]$_.CreationDate)){try{$created=[System.Management.ManagementDateTimeConverter]::ToDateTime([string]$_.CreationDate).ToUniversalTime().ToString('o')}catch{}}",
@@ -440,16 +306,8 @@ async function listClaudeProcesses(kind, installInfo = null, { runPowerShellFn =
         String(item?.name || "").toLowerCase() === "claude.exe" && !normalizedPath(item?.path)
       ));
       if (unverifiableClaudeExecutable) throw new Error("A claude.exe process could not be identified safely.");
-      return rows.filter((item) => {
-        const processName = String(item?.name || "").toLowerCase();
-        if (kind === "claude-desktop") {
-          return processName === "claude.exe"
-            && (isOfficialDesktopExecutable(item.path, installInfo) || isManagedDesktopExecutable(item.path));
-        }
-        if (processName === "claude.exe") return isOfficialClaudeCliExecutable(item.path, installInfo);
-        return processName === "node.exe" && isClaudeCodeNodeCommand(item.commandLine)
-          && !!normalizedPath(item.path) && !!item.creationDate;
-      });
+      return rows.filter((item) => String(item?.name || "").toLowerCase() === "claude.exe"
+        && (isOfficialDesktopExecutable(item.path, installInfo) || isManagedDesktopExecutable(item.path)));
     } catch (error) {
       lastError = error;
       if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
@@ -475,46 +333,32 @@ function processScanFailure(install) {
   };
 }
 
+// Claude Desktop'in kurulum ve surec durumu. Claude Code CLI'nin kendi
+// tespiti main.js'te yasar (surumu `claude --version` ile okur); burada ikinci
+// bir kopyasini tutmak iki farkli "kurulu mu" cevabi uretiyordu.
 async function getRuntimeStatus(toolId, {
   detectDesktopFn = detectClaudeDesktop,
-  detectCliFn = detectClaudeCli,
   listProcessesFn = listClaudeProcesses,
 } = {}) {
-  if (toolId === "claude-desktop") {
-    const install = await detectDesktopFn();
-    // A Cizi-managed copy can still be running after the official MSIX is
-    // removed. Always scan so restore/rebuild never mutates files in use.
-    try {
-      const processes = await listProcessesFn(toolId, install);
-      return {
-        ...install,
-        running: processes.length > 0,
-        processCount: processes.length,
-        processes,
-        processScanOk: true,
-        runtimeError: null,
-      };
-    } catch {
-      return processScanFailure(install);
-    }
+  if (toolId !== "claude-desktop") {
+    throw new Error(`Unsupported Claude runtime target: ${toolId}`);
   }
-  if (toolId === "claude-code") {
-    const install = await detectCliFn();
-    try {
-      const processes = await listProcessesFn(toolId, install);
-      return {
-        ...install,
-        running: processes.length > 0,
-        processCount: processes.length,
-        processes,
-        processScanOk: true,
-        runtimeError: null,
-      };
-    } catch {
-      return processScanFailure(install);
-    }
+  const install = await detectDesktopFn();
+  // A Cizi-managed copy can still be running after the official MSIX is
+  // removed. Always scan so restore/rebuild never mutates files in use.
+  try {
+    const processes = await listProcessesFn(toolId, install);
+    return {
+      ...install,
+      running: processes.length > 0,
+      processCount: processes.length,
+      processes,
+      processScanOk: true,
+      runtimeError: null,
+    };
+  } catch {
+    return processScanFailure(install);
   }
-  return { installed: true, running: false, processCount: 0, processes: [], processScanOk: true, runtimeError: null };
 }
 
 function processScanError(cause) {
@@ -644,7 +488,7 @@ async function stopTool(toolId, {
   }
   if (status.processScanOk === false) throw processScanError();
   if (!status.running) return { stopped: true, count: stoppedCount };
-  const error = new Error(`${toolId === "claude-desktop" ? "Claude Desktop" : "Claude Code"} could not be closed.`);
+  const error = new Error("Claude Desktop could not be closed.");
   error.code = "PROCESS_STILL_RUNNING";
   throw error;
 }
@@ -663,79 +507,6 @@ async function cleanupTemporaryInstaller(filePath) {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-}
-
-async function installClaudeCli(onProgress = () => {}, {
-  detectClaudeCliFn = detectClaudeCli,
-  runPowerShellFn = runPowerShell,
-  cleanupTemporaryInstallerFn = cleanupTemporaryInstaller,
-  runPowerShellWithHeartbeatFn = null,
-} = {}) {
-  const existing = await detectClaudeCliFn();
-  if (existing.installed) {
-    onProgress("verifying", "Claude Code is already installed.");
-    return existing;
-  }
-  onProgress("prerequisite", "Checking the official Claude Code package in WinGet...");
-  try {
-    await runPowerShellFn(claudeCodeWingetPrerequisiteScript(), { timeout: 60000, maxBuffer: 64 * 1024 });
-  } catch (error) {
-    throw cliWingetPrerequisiteFailure(error);
-  }
-  const heartbeatFile = path.join(os.tmpdir(), `Claude-Code-${Date.now()}-${crypto.randomUUID()}.heartbeat`);
-  const heartbeatRunner = runPowerShellWithHeartbeatFn ||
-    (runPowerShellFn === runPowerShell ? runPowerShellWithHeartbeat : null);
-  try {
-    onProgress("installing", "Installing the official Claude Code package with WinGet...");
-    try {
-      const options = {
-        env: { CIZI_CLAUDE_CODE_HEARTBEAT: heartbeatFile },
-        timeout: 20 * 60 * 1000,
-        maxBuffer: 16 * 1024 * 1024,
-      };
-      if (heartbeatRunner) {
-        await heartbeatRunner(claudeCodeWingetInstallScript(), options, {
-          heartbeatPath: heartbeatFile,
-          onHeartbeat: () => onProgress("installing", "WinGet is still installing Claude Code..."),
-        });
-      } else {
-        await runPowerShellFn(claudeCodeWingetInstallScript(), options);
-      }
-    } catch (error) {
-      if (error?.code === "CLAUDE_CODE_INSTALL_TIMEOUT" || error?.code === "CLAUDE_CODE_INSTALL_COMMAND_FAILED") throw error;
-      throw installerStageFailure(
-        "CLAUDE_CODE_INSTALL_FAILED",
-        "Claude Code could not be installed from the official WinGet package. Check WinGet and your network connection, then try again.",
-        "installing",
-        error,
-      );
-    }
-  } finally {
-    await cleanupTemporaryInstallerFn(heartbeatFile);
-    await cleanupTemporaryInstallerFn(`${heartbeatFile}.stdout`);
-    await cleanupTemporaryInstallerFn(`${heartbeatFile}.stderr`);
-    await cleanupTemporaryInstallerFn(`${heartbeatFile}.exit`);
-  }
-  onProgress("verifying", "Verifying Claude Code installation...");
-  let status;
-  try {
-    status = await detectClaudeCliFn();
-  } catch (error) {
-    throw installerStageFailure(
-      "CLAUDE_CODE_VERIFY_FAILED",
-      "Claude Code installation finished but could not be verified. Restart Cizi Code and try again.",
-      "verifying",
-      error,
-    );
-  }
-  if (!status.installed) {
-    throw installerFailure(
-      "CLAUDE_CODE_NOT_DETECTED",
-      "Claude Code installation finished but the CLI was not detected. Restart Cizi Code and try again.",
-      { stage: "verifying" },
-    );
-  }
-  return status;
 }
 
 // The official package is a quarter of a gigabyte, and the download is by far
@@ -780,6 +551,67 @@ async function readInstallResult(resultPath) {
   }
 }
 
+// Fetches the official package to `targetPath` and refuses to hand back anything
+// whose Authenticode signature is not Anthropic's.
+//
+// Both the automatic installation and the "download only" path go through here,
+// so there is exactly one definition of "downloaded and verified". Splitting it
+// would let one of the two paths quietly skip the signature check.
+//
+// `allowReuse` is for the install path: the package is a quarter of a gigabyte
+// and a retried install should not pull the same bytes again. A manual download
+// always fetches fresh, because the user asked for a file to keep.
+async function downloadVerifiedClaudeDesktopPackage(targetPath, onProgress = () => {}, {
+  allowReuse = false,
+  label = "Claude Desktop paketi indiriliyor",
+  runPowerShellFn = runPowerShell,
+  cleanupTemporaryInstallerFn = cleanupTemporaryInstaller,
+  inspectDownloadFn = installer.inspectDownload,
+  downloadInstallerFn = installer.downloadInstaller,
+  verifyAnthropicSignatureFn = installer.verifyAnthropicSignature,
+} = {}) {
+  // The exact published size is resolved before a single byte is fetched, so
+  // the very first progress event already carries a real percentage instead
+  // of an indeterminate spinner.
+  onProgress("downloading", "Resmî Claude Desktop paketi hazırlanıyor...", {
+    percent: 0, downloadedBytes: 0, totalBytes: null,
+  });
+  const probed = await inspectDownloadFn(CLAUDE_DESKTOP_MSIX_URL);
+  const publishedBytes = Number.isSafeInteger(probed?.contentLength) && probed.contentLength > 0
+    ? probed.contentLength
+    : null;
+  if (allowReuse && await reusableClaudeDesktopPackage(targetPath, publishedBytes)) {
+    onProgress("downloading", `Paket zaten indirilmiş (${formatByteCount(publishedBytes)}).`, {
+      percent: 100,
+      downloadedBytes: publishedBytes,
+      totalBytes: publishedBytes,
+    });
+  } else {
+    const report = createDownloadProgressReporter(onProgress, label, publishedBytes);
+    report(0, { force: true });
+    await downloadInstallerFn(CLAUDE_DESKTOP_MSIX_URL, targetPath, {
+      knownTotalBytes: publishedBytes,
+      validateResponse: (details) => assertArtifactResponse("msix", details),
+      onProgress: ({ received }) => report(received),
+    });
+    report(await fileSize(targetPath), { completed: true, force: true });
+  }
+
+  // The artifact is executable code fetched over the network, so its
+  // Authenticode signature is checked against Anthropic's publisher identity
+  // before Windows is ever asked to register it - and before the file is handed
+  // to a user who intends to run it by hand.
+  onProgress("verifying-signature", "Anthropic dijital imzası doğrulanıyor...");
+  try {
+    await verifyAnthropicSignatureFn(targetPath, { runPowerShellFn });
+  } catch (error) {
+    // A file that fails the signature check is never kept.
+    await cleanupTemporaryInstallerFn(targetPath);
+    throw error;
+  }
+  return { path: targetPath, bytes: await fileSize(targetPath), totalBytes: publishedBytes };
+}
+
 async function installClaudeDesktop(onProgress = () => {}, {
   detectClaudeDesktopFn = detectClaudeDesktop,
   runPowerShellFn = runPowerShell,
@@ -803,44 +635,14 @@ async function installClaudeDesktop(onProgress = () => {}, {
     || (runPowerShellFn === runPowerShell ? runPowerShellWithHeartbeat : null);
   let installed = false;
   try {
-    // The exact published size is resolved before a single byte is fetched, so
-    // the very first progress event already carries a real percentage instead
-    // of an indeterminate spinner.
-    onProgress("downloading", "Resmî Claude Desktop paketi hazırlanıyor...", {
-      percent: 0, downloadedBytes: 0, totalBytes: null,
+    await downloadVerifiedClaudeDesktopPackage(packageFile, onProgress, {
+      allowReuse: true,
+      runPowerShellFn,
+      cleanupTemporaryInstallerFn,
+      inspectDownloadFn,
+      downloadInstallerFn,
+      verifyAnthropicSignatureFn,
     });
-    const probed = await inspectDownloadFn(CLAUDE_DESKTOP_MSIX_URL);
-    const publishedBytes = Number.isSafeInteger(probed?.contentLength) && probed.contentLength > 0
-      ? probed.contentLength
-      : null;
-    if (await reusableClaudeDesktopPackage(packageFile, publishedBytes)) {
-      onProgress("downloading", `Paket zaten indirilmiş (${formatByteCount(publishedBytes)}).`, {
-        percent: 100,
-        downloadedBytes: publishedBytes,
-        totalBytes: publishedBytes,
-      });
-    } else {
-      const report = createDownloadProgressReporter(onProgress, "Claude Desktop paketi indiriliyor", publishedBytes);
-      report(0, { force: true });
-      await downloadInstallerFn(CLAUDE_DESKTOP_MSIX_URL, packageFile, {
-        knownTotalBytes: publishedBytes,
-        validateResponse: (details) => assertArtifactResponse("msix", details),
-        onProgress: ({ received }) => report(received),
-      });
-      report(await fileSize(packageFile), { completed: true, force: true });
-    }
-
-    // The artifact is executable code fetched over the network, so its
-    // Authenticode signature is checked against Anthropic's publisher identity
-    // before Windows is ever asked to register it.
-    onProgress("verifying-signature", "Anthropic dijital imzası doğrulanıyor...");
-    try {
-      await verifyAnthropicSignatureFn(packageFile, { runPowerShellFn });
-    } catch (error) {
-      // A file that fails the signature check is never kept for a retry.
-      await cleanupTemporaryInstallerFn(packageFile);
-      throw error;
-    }
 
     // Elevation is a property of the package, not of how Cizi Code was started:
     // the MSIX registers a localSystem service, which Windows refuses to install
@@ -922,26 +724,29 @@ async function installClaudeDesktop(onProgress = () => {}, {
   );
 }
 
-async function installTool(toolId, onProgress) {
-  const report = typeof onProgress === "function" ? onProgress : () => {};
-  if (toolId === "claude-code") return installClaudeCli(report);
-  if (toolId === "claude-desktop") return installClaudeDesktop(report);
-  throw new Error(`Installation is not supported for ${toolId}.`);
+// "Sadece indir": doğrulanmış paketi kullanıcının indirilenler klasörüne koyar
+// ve kurmaz. İmza kontrolü atlanmaz - kullanıcı bu dosyayı elle çalıştıracak.
+async function downloadClaudeDesktopForManualInstall(onProgress = () => {}, options = {}) {
+  const target = path.join(manualInstallDirectory(), "Claude-Desktop-Setup.msix");
+  const result = await downloadVerifiedClaudeDesktopPackage(target, onProgress, {
+    ...options,
+    allowReuse: false,
+    label: "Claude Desktop paketi indiriliyor (manuel kurulum)",
+  });
+  onProgress("complete", `Paket indirildi: ${result.path}`, { percent: 100 });
+  return {
+    downloaded: true,
+    ...result,
+    directory: path.dirname(result.path),
+    runHint: "Dosyaya çift tıklayın; Windows kurulum için yönetici onayı isteyecek.",
+  };
 }
 
-// What a Claude Desktop removal would touch, resolved from what is actually on
-// the machine. Shown to the user before anything is deleted, the same way the
-// Codex products preview their own removal.
-async function planClaudeDesktopUninstall({ detectClaudeDesktopFn = detectClaudeDesktop } = {}) {
-  const status = await detectClaudeDesktopFn();
-  return {
-    ...installer.planRemoval({
-      installed: status.installed,
-      version: status.Version,
-      installKind: status.InstallKind,
-    }),
-    desktop: status,
-  };
+// The non-file part of a removal: registry keys, autostart entries, shortcuts.
+// A removal category on its own, so selecting or skipping it is the user's call.
+async function removeClaudeDesktopResidue({ runPowerShellFn = runPowerShell } = {}) {
+  await runPowerShellFn(installer.removeResidueScript(), { timeout: 60000 });
+  return { removed: true };
 }
 
 // Removes Claude Desktop itself and the leftovers listed in the plan. Cizi
@@ -1011,16 +816,6 @@ async function uninstallClaudeDesktop(onProgress = () => {}, {
   };
 }
 
-function launchExecutable(executable, cwd) {
-  const target = String(executable || "").trim();
-  const shim = process.platform === "win32" && /\.(cmd|bat)$/i.test(target);
-  const command = shim ? (process.env.ComSpec || "cmd.exe") : target;
-  const args = shim ? ["/d", "/k", "call", `"${target}"`] : [];
-  const child = spawn(command, args, { cwd, detached: true, stdio: "ignore", windowsHide: false, shell: false });
-  child.unref();
-  return child;
-}
-
 function launchAppUserModelId(appUserModelId) {
   const expected = `${CLAUDE_PACKAGE_FAMILY}!Claude`;
   if (appUserModelId !== expected) {
@@ -1065,11 +860,6 @@ module.exports = {
   runPowerShell,
   createDownloadProgressReporter,
   runPowerShellWithHeartbeat,
-  claudeCodeWingetPrerequisiteScript,
-  claudeCodeWingetInstallScript,
-  wingetClaudeCodeCandidates,
-  isOfficialWingetClaudeCodePath,
-  detectClaudeCli,
   detectClaudeDesktop,
   listClaudeProcesses,
   expectedProcessIdentities,
@@ -1077,14 +867,13 @@ module.exports = {
   stopPowerShellScript,
   getRuntimeStatus,
   stopTool,
-  installClaudeCli,
   installClaudeDesktop,
+  downloadVerifiedClaudeDesktopPackage,
+  downloadClaudeDesktopForManualInstall,
   claudeDesktopPackagePath,
   reusableClaudeDesktopPackage,
-  planClaudeDesktopUninstall,
+  removeClaudeDesktopResidue,
   uninstallClaudeDesktop,
-  installTool,
-  launchExecutable,
   launchAppUserModelId,
   launchClaudeNewChat,
 };

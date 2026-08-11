@@ -18,10 +18,8 @@ const {
   withV1,
   claudeGatewayRoot,
   desktopModels,
-  buildPolicyConfig,
   buildConfigLibraryConfig,
   assertDirectGatewayConfig,
-  CONFIG_LIBRARY_SURFACE,
   buildMainState,
   brandingState,
 } = require("./claudeDesktopContract");
@@ -40,7 +38,6 @@ function createDefaultAdapters() {
       // patched, so every launch path shows the same label and there is no
       // second, launch-dependent branding mode to keep in sync.
       branding: true,
-      configurationSurface: CONFIG_LIBRARY_SURFACE,
     },
     runtime: {
       getStatus: () => lifecycle.getRuntimeStatus("claude-desktop"),
@@ -51,8 +48,6 @@ function createDefaultAdapters() {
       machineBlock: policy.machinePolicyBlock,
       capture: policy.capturePolicySnapshot,
       restore: policy.restorePolicySnapshot,
-      apply: policy.applyPolicyConfig,
-      verify: policy.verifyPolicyConfig,
       cleanupOwnedOrphans: policy.cleanupOwnedPolicyOrphans,
     },
     configLibrary: {
@@ -178,24 +173,12 @@ function createClaudeDesktopBackend(overrides = {}) {
   async function configure(values, models, main, onProgress, previousState = null) {
     onProgress("configuring", "Configuring the original Claude Desktop package...");
     const resolvedHelper = adapters.helper.ensure();
-    const configurationSurface = previousState?.configurationSurface
-      || adapters.features.configurationSurface;
-    const config = assertDirectGatewayConfig(configurationSurface === CONFIG_LIBRARY_SURFACE
-      ? buildConfigLibraryConfig(values, models, resolvedHelper)
-      : buildPolicyConfig(values, models, resolvedHelper));
-    if (configurationSurface === CONFIG_LIBRARY_SURFACE) {
-      adapters.configLibrary.apply(config);
-      if (!adapters.configLibrary.verify(config)) {
-        throw codedError("CLAUDE_CONFIG_LIBRARY_VERIFY_FAILED", "Claude Desktop gateway settings could not be verified.");
-      }
-    } else {
-      await adapters.policy.apply(config);
-      if (!await adapters.policy.verify(config)) {
-        throw codedError("CLAUDE_POLICY_VERIFY_FAILED", "Claude Desktop gateway settings could not be verified.");
-      }
+    const config = assertDirectGatewayConfig(buildConfigLibraryConfig(values, models, resolvedHelper));
+    adapters.configLibrary.apply(config);
+    if (!adapters.configLibrary.verify(config)) {
+      throw codedError("CLAUDE_CONFIG_LIBRARY_VERIFY_FAILED", "Claude Desktop gateway settings could not be verified.");
     }
     log.success("claude-desktop", "Claude Desktop Chat, 1M context ve thinking ayarları doğrulandı", {
-      configurationSurface,
       modelCount: models.length,
       longContextModels: models.filter((model) => model.supports1m === true).length,
       // Claude Desktop derives the effort picker from the model id alone. When
@@ -232,7 +215,7 @@ function createClaudeDesktopBackend(overrides = {}) {
     return { config, translation };
   }
 
-  async function applyUnlocked(values, onProgress = () => {}, { sessionMode = false } = {}) {
+  async function applyUnlocked(values, onProgress = () => {}) {
     const block = await adapters.policy.machineBlock();
     if (block.blocked) throw codedError("MACHINE_POLICY_BLOCK", "Claude Desktop is managed by a machine policy. Cizi Code will not override it.");
     const { runtime, main } = await requireMainRuntime();
@@ -242,28 +225,23 @@ function createClaudeDesktopBackend(overrides = {}) {
       throw codedError("CLAUDE_DESKTOP_MODEL_REQUIRED", "Claude Desktop için uygun bir hesap modeli bulunamadı.");
     }
 
-    // Shortcut sessions are deliberately transient and never create, update,
-    // inspect, or remove the persistent update-reconcile task. This keeps the
-    // launcher independent of stale development/legacy task definitions.
-    const reconcileTaskBefore = sessionMode
-      ? { exists: false, current: true, taskName: "Cizi Code Claude Reconcile" }
-      : await adapters.reconcileTask.getStatus();
-    if (!sessionMode && reconcileTaskBefore.exists && !reconcileTaskBefore.current) {
+    const reconcileTaskBefore = await adapters.reconcileTask.getStatus();
+    if (reconcileTaskBefore.exists && !reconcileTaskBefore.current) {
       throw codedError("CLAUDE_RECONCILE_TASK_CONFLICT", "A different scheduled task is using Cizi Code's Claude update-monitor name.");
     }
     const { state: previousState, unreadable } = readStateRecord();
     refuseUnreadableState(unreadable);
     const wasActive = previousState?.active === true;
     if (!wasActive) await adapters.policy.cleanupOwnedOrphans(values.base);
-    if (adapters.features.configurationSurface === CONFIG_LIBRARY_SURFACE) {
-      const userPolicy = await adapters.policy.capture();
-      const conflicting = Object.values(userPolicy?.values || {}).some((value) => value?.existed);
-      if (conflicting) {
-        throw codedError(
-          "USER_POLICY_BLOCK",
-          "Claude Desktop already has a user policy. Cizi Code did not override it.",
-        );
-      }
+    // A user policy Cizi Code did not write would silently outrank the
+    // configuration library entry, so it is treated as a refusal rather than
+    // overridden.
+    const userPolicy = await adapters.policy.capture();
+    if (Object.values(userPolicy?.values || {}).some((value) => value?.existed)) {
+      throw codedError(
+        "USER_POLICY_BLOCK",
+        "Claude Desktop already has a user policy. Cizi Code did not override it.",
+      );
     }
     let baseline = adapters.state.readBaseline();
     if (wasActive && !baseline) throw codedError("REPAIR_REQUIRED", "Claude Desktop's original settings backup is missing; repair is required.");
@@ -287,9 +265,7 @@ function createClaudeDesktopBackend(overrides = {}) {
     let reconcileTaskResult = null;
     let brandingTaskResult = null;
     let shortcutResult = null;
-    const brandingTaskBefore = sessionMode
-      ? { exists: false, current: true }
-      : await adapters.brandingTask.getStatus();
+    const brandingTaskBefore = await adapters.brandingTask.getStatus();
     try {
       ({ translation } = await configure(values, models, main, onProgress, previousState));
       const after = await adapters.runtime.getStatus();
@@ -298,11 +274,9 @@ function createClaudeDesktopBackend(overrides = {}) {
         schemaVersion: STATE_SCHEMA_VERSION,
         backend: "original-package",
         active: true,
-        sessionMode,
         phase: "on",
         baseUrl: claudeGatewayRoot(values.base),
         models,
-        configurationSurface: adapters.features.configurationSurface,
         brandingMode: translation.status === "active" ? (translation.mode || "file-branding") : "none",
         mainPackage: buildMainState(main),
         translationStatus: translation.status,
@@ -315,7 +289,7 @@ function createClaudeDesktopBackend(overrides = {}) {
       // ORDER MATTERS. The intent marker is written only after the files are
       // actually branded: writing it first would let the repair task patch a
       // machine whose switch never finished turning on.
-      if (translation.status === "active" && !sessionMode) {
+      if (translation.status === "active") {
         adapters.branding.setDesired(true, main);
         brandingTaskResult = await adapters.brandingTask.ensure();
         // Best-effort by design: a shortcut that cannot be rewritten must not
@@ -328,9 +302,7 @@ function createClaudeDesktopBackend(overrides = {}) {
           });
         }
       }
-      reconcileTaskResult = sessionMode
-        ? { current: true, removed: false, skipped: "transient-session" }
-        : await adapters.reconcileTask.ensure();
+      reconcileTaskResult = await adapters.reconcileTask.ensure();
       try {
         adapters.legacy.cleanupLegacy({ baseline });
       } catch (migrationError) {
@@ -342,13 +314,7 @@ function createClaudeDesktopBackend(overrides = {}) {
       // switch has to close a running instance to apply anything - starting it
       // again afterwards made the app appear on its own, which is not something
       // the user asked for. `launch` (the shortcut and the button behind it) is
-      // the only path that starts Claude, and a session started that way is
-      // where a failure to launch still has to fail the transaction.
-      let launched = false;
-      if (sessionMode) {
-        await adapters.runtime.launchChat(main.appUserModelId);
-        launched = true;
-      }
+      // the only path that starts Claude.
       return {
         ok: true,
         applied: true,
@@ -356,11 +322,9 @@ function createClaudeDesktopBackend(overrides = {}) {
         hasBackup: true,
         backend: "original-package",
         appUserModelId: main.appUserModelId,
-        launched,
-        automaticUpdateReconcile: sessionMode ? false : reconcileTaskResult.current !== false,
-        automaticBrandingRepair: !sessionMode && brandingTaskResult?.current === true,
-        redirectedShortcuts: shortcutResult?.redirected || 0,
-        sessionMode,
+        launched: false,
+        automaticUpdateReconcile: reconcileTaskResult.current !== false,
+        automaticBrandingRepair: brandingTaskResult?.current === true,
         translationStatus: translation.status,
         translationMessage: translation.message || null,
         brandingStatus: translation.status === "active" ? "active" : "inactive",
@@ -372,7 +336,7 @@ function createClaudeDesktopBackend(overrides = {}) {
       let rollbackError = null;
       try {
         await surface.restore(rollbackSurface);
-        if (!sessionMode && !reconcileTaskBefore.exists) await adapters.reconcileTask.remove();
+        if (!reconcileTaskBefore.exists) await adapters.reconcileTask.remove();
         // Branding files are only put back when this operation is what patched
         // them. If the switch was already on, the previous run owns them and
         // restoring here would strip a working integration.
@@ -380,9 +344,7 @@ function createClaudeDesktopBackend(overrides = {}) {
           adapters.branding.setDesired(false);
           await adapters.branding.removeForState({ mainPackage: buildMainState(main) });
         }
-        if (!sessionMode && !brandingTaskBefore.exists && brandingTaskResult) {
-          await adapters.brandingTask.remove();
-        }
+        if (!brandingTaskBefore.exists && brandingTaskResult) await adapters.brandingTask.remove();
         if (shortcutResult?.redirected) adapters.shortcuts.restore();
       } catch (failure) { rollbackError = failure; }
       if (wasActive) {
@@ -471,7 +433,7 @@ function createClaudeDesktopBackend(overrides = {}) {
           await adapters.branding.ensureForMain(main);
           adapters.branding.setDesired(true, main);
         }
-        if (reconcileTaskRemoved && !state?.sessionMode) await adapters.reconcileTask.ensure();
+        if (reconcileTaskRemoved) await adapters.reconcileTask.ensure();
       } catch (failure) { rollbackError = failure; }
       // A record that could not be read must not be rebuilt from guesses; the
       // baseline is still on disk, so a later attempt can restore from it.
@@ -486,14 +448,13 @@ function createClaudeDesktopBackend(overrides = {}) {
     }
   }
 
-  async function policyConfigured(state) {
+  // "Yapilandirma gercekten yerinde mi" sorusunun cevabi kayittan degil,
+  // Claude'un okudugu dosyadan gelir.
+  function gatewayConfigured(state) {
     if (!state?.active || !adapters.helper.isCurrent()) return false;
-    if (state.configurationSurface === CONFIG_LIBRARY_SURFACE) {
-      return adapters.configLibrary.verify(
-        buildConfigLibraryConfig({ base: state.baseUrl }, state.models || [], adapters.helper.path()),
-      );
-    }
-    return adapters.policy.verify(buildPolicyConfig({ base: state.baseUrl }, state.models || [], adapters.helper.path()));
+    return adapters.configLibrary.verify(
+      buildConfigLibraryConfig({ base: state.baseUrl }, state.models || [], adapters.helper.path()),
+    );
   }
 
   async function getStatus(expectedBase) {
@@ -505,23 +466,26 @@ function createClaudeDesktopBackend(overrides = {}) {
     // outlive its integration on one of them while the other is kept tidy.
     if (!state?.active && !unreadable && !hasBaseline && !operation) {
       await adapters.policy.cleanupOwnedOrphans(expectedBase);
-      if (adapters.features.configurationSurface === CONFIG_LIBRARY_SURFACE
-          && typeof adapters.configLibrary.cleanupOwned === "function") {
-        adapters.configLibrary.cleanupOwned();
-      }
+      if (typeof adapters.configLibrary.cleanupOwned === "function") adapters.configLibrary.cleanupOwned();
     }
     const block = await adapters.policy.machineBlock();
-    // A baseline on disk means the user's original settings are still parked
-    // somewhere else, so there is something the switch has to be able to put
-    // back - whatever the state record does or does not say. A completed OFF
-    // deletes the baseline with the state, so this can never read "on" over a
-    // machine that is genuinely clean.
-    const applied = state?.active === true || hasBaseline;
-    const configured = applied && await policyConfigured(state);
-    let automaticUpdateReconcile = !applied || state?.sessionMode === true;
+    // Two different facts, deliberately kept apart:
+    //   applied     - Cizi Code's configuration is meant to be in place
+    //   restorable  - the user's original settings are still parked in our backup
+    // Conflating them is what let the switch report "connected" over a machine
+    // where an interrupted attempt had already removed the configuration and
+    // only the backup survived. `restorable` is what says the switch still has
+    // something to put back; `applied` is what says it is actually on.
+    const applied = state?.active === true;
+    const restorable = hasBaseline;
+    // A backup with no active record is an OFF that never finished. It is not
+    // "connected", but it is not clean either - it needs the switch cycled.
+    const unfinishedDisconnect = restorable && !applied;
+    const configured = applied && gatewayConfigured(state);
+    let automaticUpdateReconcile = !applied;
     let reconcileTaskStatusError = null;
-    let automaticBrandingRepair = !applied || state?.sessionMode === true;
-    if (applied && !state?.sessionMode) {
+    let automaticBrandingRepair = !applied;
+    if (applied) {
       try { automaticUpdateReconcile = await adapters.reconcileTask.isCurrent(); }
       catch (error) { reconcileTaskStatusError = error; automaticUpdateReconcile = false; }
       try { automaticBrandingRepair = await adapters.brandingTask.isCurrent(); }
@@ -546,15 +510,15 @@ function createClaudeDesktopBackend(overrides = {}) {
     const packageChanged = !!(applied && runtime.installed && state?.mainPackage
       && (state.mainPackage.packageFullName !== runtime.PackageFullName
         || state.mainPackage.version !== runtime.Version));
-    const needsRefresh = !!(applied && runtime.installed
-      && (!configured
-        || (!state?.sessionMode && !automaticUpdateReconcile)
-        || (!state?.sessionMode && !automaticBrandingRepair)
-        || packageChanged
-        || translationStatus === "error"
-        || unreadable
-        || !state
-        || state.phase === "degraded"));
+    const needsRefresh = !!(runtime.installed
+      && (unfinishedDisconnect
+        || (applied && (!configured
+          || !automaticUpdateReconcile
+          || !automaticBrandingRepair
+          || packageChanged
+          || translationStatus === "error"
+          || unreadable
+          || state.phase === "degraded"))));
     const detectionState = runtime.detectionError ? "unknown" : "known";
     const processState = runtime.processScanOk === false ? "unknown" : "known";
     const blocked = !!block.blocked || detectionState === "unknown" || processState === "unknown";
@@ -567,13 +531,14 @@ function createClaudeDesktopBackend(overrides = {}) {
       processCount: runtime.processCount || 0,
       version: runtime.Version || null,
       applied,
-      sessionMode: applied && state?.sessionMode === true,
+      restorable,
+      unfinishedDisconnect,
+      // Kept as the name older call sites use for "there is a backup to put back".
+      hasBackup: restorable,
       configured,
-      hasBackup: adapters.state.hasBaseline(),
       needsRefresh,
       automaticUpdateReconcile,
       automaticBrandingRepair,
-      shortcutRedirect: applied ? adapters.shortcuts.getStatus() : { managed: 0, redirected: 0, unredirected: 0 },
       backend: "original-package",
       appUserModelId: packageIdentity.CLAUDE_MAIN_APP_ID,
       translationStatus,
@@ -581,7 +546,9 @@ function createClaudeDesktopBackend(overrides = {}) {
       brandingStatus: applied && state?.brandingMode === "file-branding" && translationStatus !== "error"
         ? "active" : "inactive",
       brandingApplied,
-      phase: unreadable || (applied && !state) ? "repair-required" : (state?.phase || (applied ? "on" : "off")),
+      phase: unreadable ? "repair-required"
+        : unfinishedDisconnect ? "disconnect-pending"
+          : (state?.phase || (applied ? "on" : "off")),
       detectionState,
       processState,
       errorCode: detectionState === "unknown" ? "CLAUDE_DESKTOP_DETECTION_FAILED"
@@ -707,10 +674,6 @@ function createClaudeDesktopBackend(overrides = {}) {
 
   return {
     apply: (values, onProgress) => exclusive("connect", () => applyUnlocked(values, onProgress)),
-    beginSession: (values, onProgress) => exclusive(
-      "session-start",
-      () => applyUnlocked(values, onProgress, { sessionMode: true }),
-    ),
     revert: () => exclusive("disconnect", revertUnlocked),
     reconcile: (onProgress) => exclusive("repair", () => reconcileUnlocked(onProgress)),
     launch: (onProgress) => exclusive("launch", () => launchUnlocked(onProgress)),
@@ -729,8 +692,6 @@ module.exports = {
   capturePolicySnapshot: policy.capturePolicySnapshot,
   restorePolicySnapshot: policy.restorePolicySnapshot,
   policySnapshotsEqual: policy.policySnapshotsEqual,
-  buildPolicyConfig,
-  cleanupOwnedPolicyOrphans: policy.cleanupOwnedPolicyOrphans,
   captureOwnedFiles: credential.captureOwnedFiles,
   restoreOwnedFiles: credential.restoreOwnedFiles,
   ownedFilesEqual: credential.ownedFilesEqual,

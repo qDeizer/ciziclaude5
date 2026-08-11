@@ -20,6 +20,7 @@
 const fs = require("fs");
 const path = require("path");
 const { sharedPaths } = require("./codexPaths");
+const { writeFileAtomic } = require("./fsAtomic");
 const { ONE_MILLION_TOKENS, compactWindowFor, isReasoningLevel } = require("../renderer/modelCapabilities");
 
 const PROVIDER_ID = "cizicode";
@@ -41,12 +42,53 @@ function configPath() {
   return sharedPaths().configFile;
 }
 
-function readConfigText() {
+// `null` yalnızca dosya YOK anlamına gelir.
+//
+// Eskiden her okuma hatası null dönüyordu; bu, var olan ama okunamayan bir
+// config.toml'u (başka bir süreç kilitlemiş, izin yok, disk hatası) "dosya yok"
+// gibi gösteriyordu - ve yazma yolu o dosyanın üzerine sıfırdan bir config
+// yazıyordu. Kullanıcının bütün Codex ayarlarını sessizce silen yol buydu.
+// Okunamayan dosya artık hata verir; hiçbir şey yazılmaz.
+function readConfigText({ tolerateUnreadable = false } = {}) {
   try {
     return fs.readFileSync(configPath(), "utf8");
-  } catch {
-    return null;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    if (tolerateUnreadable) return null;
+    throw Object.assign(
+      new Error("Codex ayar dosyası okunamadı; hiçbir değişiklik yapılmadı."),
+      { code: "CODEX_CONFIG_UNREADABLE", cause: error, userMessage: "Codex ayar dosyası okunamadı; hiçbir değişiklik yapılmadı." },
+    );
   }
+}
+
+// Kullanıcının dosyasının kendi biçimi korunur.
+//
+// NEDEN: `split(/\r?\n/)` + `join("\n")` bir dosyayı satır satır yeniden yazar.
+// Windows'ta Not Defteri ile düzenlenmiş bir config.toml CRLF'tir; bu yol onu
+// LF'e çevirir. Sonuç iki yerde yanlıştır: (1) yalnızca kendi anahtarlarımıza
+// dokunacağımızı söylerken dosyanın her satırını değiştirmiş oluruz,
+// (2) anahtar kapatıldığında dosya birebir eski haline dönmez (madde 7).
+// Aynı gerekçe BOM için de geçerli: BOM'lu bir dosyada `^\s*model\s*=` hiç
+// eşleşmediği için anahtar ikinci kez yazılıyor ve işlem hata veriyordu.
+function readShape(text) {
+  const value = String(text == null ? "" : text);
+  const hasBom = value.charCodeAt(0) === 0xFEFF;
+  const body = hasBom ? value.slice(1) : value;
+  const crlf = (body.match(/\r\n/g) || []).length;
+  const lf = (body.match(/(?<!\r)\n/g) || []).length;
+  return {
+    bom: hasBom ? "﻿" : "",
+    newline: crlf > lf ? "\r\n" : "\n",
+    body,
+  };
+}
+
+function renderLines(lines, shape) {
+  const joined = lines.join(shape.newline)
+    .replace(new RegExp(`(?:${shape.newline === "\r\n" ? "\\r\\n" : "\\n"}){3,}`, "g"), shape.newline.repeat(2))
+    .replace(new RegExp(`(?:${shape.newline === "\r\n" ? "\\r\\n" : "\\n"})+$`), "");
+  return `${shape.bom}${joined}${shape.newline}`;
 }
 
 function escapeBasicString(value) {
@@ -201,7 +243,7 @@ function pruneBackups() {
 // (The test suite parses the results with a real TOML parser to prove the rest
 // of the file survives.)
 function structuralProblem(text, expected) {
-  const lines = splitLines(text);
+  const lines = splitLines(readShape(text).body);
   const limit = topLevelEnd(lines);
   for (const key of OWNED_TOP_LEVEL_KEYS) {
     const top = lines.slice(0, limit).filter((line) => new RegExp(`^\\s*${key}\\s*=`).test(line)).length;
@@ -222,15 +264,14 @@ function structuralProblem(text, expected) {
 // a broken config behind for either Codex product.
 function writeVerified(text, previousText, expected) {
   const target = configPath();
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, text, "utf8");
+  writeFileAtomic(target, text);
   const written = fs.readFileSync(target, "utf8");
   const problem = written !== text
     ? "Yapılandırma dosyası beklendiği gibi yazılamadı"
     : structuralProblem(written, expected);
   if (problem) {
     if (previousText == null) fs.rmSync(target, { force: true });
-    else fs.writeFileSync(target, previousText, "utf8");
+    else writeFileAtomic(target, previousText);
     throw new Error(`${problem}; Codex ayar dosyası eski haline döndürüldü.`);
   }
 }
@@ -238,7 +279,11 @@ function writeVerified(text, previousText, expected) {
 // Current state of the shared config, used for status reporting and for the
 // "is this actually pointed at THIS gateway" check.
 function readState(expectedBase) {
-  const text = readConfigText();
+  // Durum sorgusu her yerden çağrılıyor (ekran yenilemesi, periyodik denetim);
+  // okunamayan bir dosya yüzünden hata atmak yerine "yapılandırılmamış" denir.
+  // Yazma yolu ise aynı durumda hata verir - orada sessiz kalmak dosyayı silmek
+  // anlamına gelirdi.
+  const text = readConfigText({ tolerateUnreadable: true });
   if (text == null) {
     return {
       exists: false,
@@ -253,7 +298,7 @@ function readState(expectedBase) {
       applied: false,
     };
   }
-  const lines = splitLines(text);
+  const lines = splitLines(readShape(text).body);
   const range = providerBlockRange(lines);
   const block = range ? lines.slice(range.start, range.end).join("\n") : "";
   const baseUrl = block.match(/^\s*base_url\s*=\s*["']([^"']+)["']/m)?.[1] || null;
@@ -315,7 +360,8 @@ function applyCizi({
   const before = readState();
   const backup = previousText == null ? null : backupConfig();
 
-  const lines = splitLines(previousText == null ? "" : previousText);
+  const shape = readShape(previousText);
+  const lines = splitLines(shape.body);
   setTopLevelString(lines, "model", modelId);
   setTopLevelString(lines, "model_provider", PROVIDER_ID);
   setTopLevelString(lines, "model_catalog_json", catalogPath);
@@ -332,7 +378,7 @@ function applyCizi({
     lines.push(...block, "");
   }
 
-  const text = `${lines.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "")}\n`;
+  const text = renderLines(lines, shape);
   writeVerified(text, previousText, {
     model: modelId,
     provider: PROVIDER_ID,
@@ -380,7 +426,8 @@ function revertCizi({
   if (previousText == null) return { changed: false, reason: "not-found" };
 
   const backup = backupConfig();
-  const lines = splitLines(previousText);
+  const shape = readShape(previousText);
+  const lines = splitLines(shape.body);
   let changed = false;
 
   const range = providerBlockRange(lines);
@@ -439,7 +486,7 @@ function revertCizi({
 
   if (!changed) return { changed: false, reason: "not-present", backup };
 
-  const text = `${lines.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "")}\n`;
+  const text = renderLines(lines, shape);
   writeVerified(text, previousText, {
     model: previousModel,
     model_context_window: previousModelContextWindow == null ? null : String(previousModelContextWindow),
@@ -460,7 +507,7 @@ function readPreviousFromSnapshot(content) {
     autoCompactTokenLimit: null,
     reasoningEffort: null,
   };
-  const lines = splitLines(content);
+  const lines = splitLines(readShape(content).body);
   return {
     model: readTopLevelString(lines, "model"),
     modelProvider: readTopLevelString(lines, "model_provider"),

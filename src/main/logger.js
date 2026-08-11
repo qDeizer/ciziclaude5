@@ -7,8 +7,14 @@ const fs = require("fs");
 const path = require("path");
 
 const MAX_BUFFER = 800;
+// Günlük dosyası DÖNDÜRÜLÜR. Döndürmemek sessiz bir madde 10 ihlaliydi: periyodik
+// denetim her turda satır yazıyor ve dosya yalnızca kullanıcı elle temizlerse
+// küçülüyordu. Sürekli açık bir makinede bu, aylar içinde onlarca megabaytlık bir
+// dosya demek. İki dosya tutulur (güncel + bir önceki), yani en fazla 2×MAX.
+const MAX_LOG_BYTES = 2 * 1024 * 1024;
 const buffer = [];
 let logFilePath = null;
+let bytesWritten = null;
 let listeners = [];
 
 function file() {
@@ -18,6 +24,30 @@ function file() {
     logFilePath = path.join(dir, "cizicode-desktop.log");
   }
   return logFilePath;
+}
+
+// Boyut her yazımda diskten sorulmaz; bir kez okunup bellekte sayılır. Aksi
+// halde her günlük satırı fazladan bir `stat` çağrısı olurdu.
+function currentSize(target) {
+  if (bytesWritten == null) {
+    try { bytesWritten = fs.statSync(target).size; } catch { bytesWritten = 0; }
+  }
+  return bytesWritten;
+}
+
+function rotateIfNeeded(target, incoming) {
+  if (currentSize(target) + incoming <= MAX_LOG_BYTES) return;
+  try {
+    // Önceki tur üzerine yazılır: iki dosyadan fazlasını tutmak, sorun çözmeye
+    // katkısı olmayan disk kullanımıdır.
+    fs.rmSync(`${target}.1`, { force: true });
+    fs.renameSync(target, `${target}.1`);
+    bytesWritten = 0;
+  } catch {
+    // Döndürme başarısızsa günlük yazmaya devam edilir; günlük tutmak, günlük
+    // dosyasının boyutundan önce gelir.
+    bytesWritten = 0;
+  }
 }
 
 function safeJson(o) {
@@ -56,7 +86,14 @@ function log(level, scope, message, meta) {
 
   const line = `[${entry.ts}] ${entry.level.toUpperCase().padEnd(5)} [${entry.scope}] ${entry.message}${entry.meta ? " " + safeJson(entry.meta) : ""}`;
   try { (entry.level === "error" ? console.error : console.log)(line); } catch { /* ignore */ }
-  try { fs.appendFileSync(file(), line + "\n"); } catch { /* ignore */ }
+  try {
+    const target = file();
+    const payload = `${line}\n`;
+    const size = Buffer.byteLength(payload);
+    rotateIfNeeded(target, size);
+    fs.appendFileSync(target, payload);
+    bytesWritten = currentSize(target) + size;
+  } catch { /* ignore */ }
 
   for (const fn of listeners) { try { fn(entry); } catch { /* ignore */ } }
   return entry;
@@ -73,7 +110,14 @@ module.exports = {
   error: (scope, msg, meta) => log("error", scope, msg, meta),
   debug: (scope, msg, meta) => log("debug", scope, msg, meta),
   recent: (limit = 300) => buffer.slice(-Math.max(1, Math.min(limit, MAX_BUFFER))),
-  clear: () => { buffer.length = 0; try { fs.writeFileSync(file(), ""); } catch { /* ignore */ } },
+  clear: () => {
+    buffer.length = 0;
+    try {
+      fs.writeFileSync(file(), "");
+      fs.rmSync(`${file()}.1`, { force: true });
+      bytesWritten = 0;
+    } catch { /* ignore */ }
+  },
   filePath: () => file(),
-  onEntry: (fn) => { listeners.push(fn); return () => { listeners = listeners.filter((f) => f !== fn); }; },
+  MAX_LOG_BYTES,
 };
