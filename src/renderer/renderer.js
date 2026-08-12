@@ -21,6 +21,7 @@ function $(id) {
 // takılı kalır. Köprü doğrudan global olarak kullanılır.
 const {
   modelName,
+  desktopClients,
   modelsForTool,
   accessibleToolIds,
   capabilityToolForModel,
@@ -42,6 +43,7 @@ const SWITCH_IDS = [CLAUDE_CODE, CLAUDE_DESKTOP, CODEX];
 const NAMES = {
   [CLAUDE_CODE]: "Claude Code CLI",
   [CLAUDE_DESKTOP]: "Claude Desktop",
+  [CODEX]: "Codex (CLI + ChatGPT Desktop)",
   [CODEX_CLI_PRODUCT]: "Codex CLI",
   [CODEX_DESKTOP_PRODUCT]: "ChatGPT Desktop",
 };
@@ -51,6 +53,12 @@ let ME = null;
 let CLAUDE_STATE = { cli: { installed: false }, desktop: { installed: false } };
 let CODEX_STATE = { cli: { installed: false }, desktop: { installed: false }, config: { applied: false } };
 let LAST_REFRESH = null;
+let LAST_TOOL_STATUSES = [];
+let LAST_USAGE_SERIES = [];
+let CURRENT_SCREEN = "dashboard";
+let SELECTED_TOOL_ID = null;
+let CONNECTION_MAP = null;
+let QUOTA_VIEW = { percent: 100, unlimited: true, label: "∞" };
 
 // ----------------------------------------------------------------- yardımcı
 
@@ -96,6 +104,34 @@ function token(name) {
 function show(view) {
   $("login-view").classList.toggle("hidden", view !== "login");
   $("dash-view").classList.toggle("hidden", view !== "dash");
+}
+
+function showAppScreen(screen, selectedToolId = null) {
+  CURRENT_SCREEN = screen === "config" ? "config" : "dashboard";
+  if (selectedToolId && SWITCH_IDS.includes(selectedToolId)) SELECTED_TOOL_ID = selectedToolId;
+  $("dashboard-screen").classList.toggle("hidden", CURRENT_SCREEN !== "dashboard");
+  $("config-screen").classList.toggle("hidden", CURRENT_SCREEN !== "config");
+  for (const [id, active] of [["screen-dashboard", CURRENT_SCREEN === "dashboard"], ["screen-config", CURRENT_SCREEN === "config"]]) {
+    const tab = $(id);
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-pressed", String(active));
+  }
+  if (CURRENT_SCREEN === "config") renderConfigDetail();
+  requestAnimationFrame(() => {
+    if (CURRENT_SCREEN === "dashboard") {
+      CONNECTION_MAP?.layout?.();
+      drawChart(LAST_USAGE_SERIES);
+      return;
+    }
+    // Dashboard'dan bir araca tıklanarak gelindiyse o kartın yanına gidilir;
+    // üç kart da ekranda olduğu için bir ayıklama listesine gerek yok.
+    if (!selectedToolId) return;
+    const target = document.querySelector(`.card[data-tool-id="${selectedToolId}"]`);
+    if (!target) return;
+    target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    target.classList.add("is-target");
+    setTimeout(() => target.classList.remove("is-target"), 1600);
+  });
 }
 
 // ---------------------------------------------------------------- ilerleme
@@ -225,6 +261,7 @@ async function doLogin() {
 
 async function enterDashboard() {
   show("dash");
+  showAppScreen("dashboard");
   const session = await cizi.getSession();
   if (session.ok && session.data?.gateway) $("conn-base").textContent = session.data.gateway;
   await refreshAll();
@@ -254,7 +291,9 @@ function renderQuota(me) {
   const remaining = me.remainingPercent;
   const unlimited = remaining == null || !Number.isFinite(Number(remaining));
   const percent = unlimited ? 100 : Math.max(0, Math.min(100, Math.round(Number(remaining))));
-  $("quota-pct").textContent = unlimited ? "∞" : `%${percent}`;
+  const label = unlimited ? "∞" : `%${percent}`;
+  QUOTA_VIEW = { percent, unlimited, label };
+  $("quota-pct").textContent = label;
   const fill = $("quota-fill");
   fill.style.width = `${percent}%`;
   fill.className = `meter-fill${!unlimited && percent <= 10 ? " bad" : !unlimited && percent <= 30 ? " warn" : ""}`;
@@ -265,6 +304,7 @@ function renderQuota(me) {
   const limit = $("limit-msg");
   limit.textContent = me.isLimitReached ? (me.limitMessage || "Cizi Code kullanım sınırınıza ulaşıldı.") : "";
   limit.classList.toggle("hidden", !me.isLimitReached);
+  updateUsageTank();
 }
 
 function renderLastRefresh() {
@@ -281,6 +321,7 @@ function renderModels(models) {
     chip.className = "chip empty";
     chip.textContent = "Henüz model yok";
     box.appendChild(chip);
+    renderConnectionMap();
     return;
   }
   for (const model of models) {
@@ -300,6 +341,7 @@ function renderModels(models) {
       + ` · düşünme seviyeleri: ${profile.reasoningLevels.join(", ")}`;
     box.appendChild(chip);
   }
+  renderConnectionMap();
 }
 
 async function loadUsage(period) {
@@ -311,6 +353,7 @@ async function loadUsage(period) {
   const payload = result.data;
   const raw = payload?.chart || payload?.usage?.chart || payload?.data?.chart || [];
   const series = Array.isArray(raw) ? raw : [];
+  LAST_USAGE_SERIES = series;
   // Eğilim çubuklarının hangi alandan geldiği sunucu sürümüne göre değişiyor.
   // Hangi alanın okunduğu kaydedilir, böylece "grafik boş" durumunun sebebi
   // tahmin edilmek zorunda kalmaz.
@@ -354,8 +397,8 @@ function drawChart(data) {
   const max = Math.max(1, ...values);
   const barWidth = (width - pad.left - pad.right) / data.length;
   const gradient = ctx.createLinearGradient(0, pad.top, 0, height - pad.bottom);
-  gradient.addColorStop(0, token("--pine"));
-  gradient.addColorStop(1, token("--teal"));
+  gradient.addColorStop(0, token("--accent"));
+  gradient.addColorStop(1, token("--accent-deep"));
 
   // Kullanımı olmayan gün de bir gündür: sıfır değerler 1 piksellik bir iz
   // bırakır. Hiç çizmemek, tek günlük kullanımı olan bir hesapta grafiği bozuk
@@ -366,7 +409,9 @@ function drawChart(data) {
     const x = pad.left + index * barWidth;
     const y = height - pad.bottom - barHeight;
     ctx.fillStyle = value > 0 ? gradient : token("--line");
-    const w = Math.max(1, barWidth - 3);
+    // Çubuk yuvanın tamamını doldurmaz: 30 günlük seride bitişik çubuklar tek
+    // bir renk duvarına dönüşüp günleri okunmaz yapıyordu.
+    const w = Math.max(2, Math.min(barWidth - 3, barWidth * 0.62));
     const r = Math.min(3, w / 2);
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -388,6 +433,224 @@ function drawChart(data) {
   });
 }
 
+// ------------------------------------------------------ bağlantı haritası
+
+const TOOL_ICON_SVG = {
+  cli: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7.5 9 12l-4 4.5M12.5 16.5h6"/></svg>',
+  app: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.2"/><path d="M3.5 9h17M8.5 9v10.5"/></svg>',
+};
+
+function localToolInstalled(toolId) {
+  if (toolId === CLAUDE_CODE) {
+    return CLAUDE_STATE.cli?.installed === true || (CLAUDE_STATE.cli?.editorExtensions || []).length > 0;
+  }
+  if (toolId === CLAUDE_DESKTOP) return CLAUDE_STATE.desktop?.installed === true;
+  if (toolId === CODEX) {
+    return CODEX_STATE.cli?.installed === true
+      || CODEX_STATE.desktop?.installed === true
+      || (CODEX_STATE.cli?.editorExtensions || []).length > 0;
+  }
+  return false;
+}
+
+function dashboardToolNodes(offeredIds) {
+  const nodes = [];
+  if (offeredIds.includes(CLAUDE_CODE)) {
+    nodes.push({ key: CLAUDE_CODE, switchId: CLAUDE_CODE, name: NAMES[CLAUDE_CODE], icon: "cli" });
+  }
+  if (offeredIds.includes(CLAUDE_DESKTOP)) {
+    nodes.push({ key: CLAUDE_DESKTOP, switchId: CLAUDE_DESKTOP, name: NAMES[CLAUDE_DESKTOP], icon: "app" });
+  }
+  if (offeredIds.includes(CODEX)) {
+    nodes.push({ key: CODEX_CLI_PRODUCT, switchId: CODEX, name: NAMES[CODEX_CLI_PRODUCT], icon: "cli" });
+    nodes.push({ key: CODEX_DESKTOP_PRODUCT, switchId: CODEX, name: NAMES[CODEX_DESKTOP_PRODUCT], icon: "app" });
+  }
+  return nodes;
+}
+
+// İki tam periyotluk sinüs. Genişlik tankın iki katı olduğu için -%50'lik
+// öteleme dikişsiz döngü verir; öğe DÖNDÜRÜLMEZ — döndürülen geniş bir elips
+// kartın dışına taşıp köşegen iz bırakıyordu.
+const WAVE_SVG = '<svg viewBox="0 0 240 20" preserveAspectRatio="none" aria-hidden="true">'
+  + '<path fill="currentColor" d="M0 10 C15 2 45 2 60 10 C75 18 105 18 120 10'
+  + ' C135 2 165 2 180 10 C195 18 225 18 240 10 L240 20 L0 20 Z"/></svg>';
+
+function tankElements() {
+  const liquid = document.createElement("span");
+  liquid.className = "tank-liquid";
+  const back = document.createElement("span");
+  back.className = "tank-wave tank-wave--back";
+  back.innerHTML = WAVE_SVG;
+  const front = document.createElement("span");
+  front.className = "tank-wave";
+  front.innerHTML = WAVE_SVG;
+  liquid.append(back, front);
+
+  const brand = document.createElement("span");
+  brand.className = "tank-brand";
+  brand.textContent = "Cizi Code";
+
+  // Yüzde ve etiketi birlikte ortalanır. Etiketi tankın DİBİNE sabitlemek,
+  // hak %10'un altına düştüğünde onu kızarmış sıvının içinde bırakıyordu.
+  const readout = document.createElement("span");
+  readout.className = "tank-readout";
+  const value = document.createElement("span");
+  value.className = "tank-value";
+  const caption = document.createElement("span");
+  caption.className = "tank-caption";
+  readout.append(value, caption);
+  return [liquid, brand, readout];
+}
+
+function updateUsageTank() {
+  const provider = document.querySelector("#connection-map .cbh__card--provider");
+  if (!provider) return;
+  const { percent, unlimited, label } = QUOTA_VIEW;
+  provider.classList.remove("usage-warn", "usage-bad");
+  if (!unlimited && percent <= 10) provider.classList.add("usage-bad");
+  else if (!unlimited && percent <= 30) provider.classList.add("usage-warn");
+  provider.style.setProperty("--quota-level", `${percent}%`);
+  const value = provider.querySelector(".tank-value");
+  if (value) value.textContent = label;
+  const caption = provider.querySelector(".tank-caption");
+  if (caption) caption.textContent = unlimited ? "Sınırsız" : "Kalan hak";
+  provider.title = unlimited
+    ? "Planınız şu an sınırsız."
+    : `Kullanım hakkınızın %${percent}'i kaldı.`;
+}
+
+// Panel başlığı süs değil sayım: kaç araç sunuluyor, kaçı gerçekten bağlı.
+function renderMapSummary(tools, byStatus) {
+  const summary = $("map-summary");
+  if (!summary) return;
+  if (!tools.length) {
+    summary.textContent = "Bu profil için yapılandırılabilir bir yerel araç yok";
+    return;
+  }
+  const connected = tools.filter((tool) => byStatus.get(tool.switchId)?.applied === true).length;
+  summary.textContent = `${tools.length} araç · ${connected} bağlı`;
+}
+
+function renderConnectionMap() {
+  const root = $("connection-map");
+  if (!root || typeof window.CiziBaglantiHaritasi !== "function") return;
+  const models = Array.isArray(TEMPLATES?.combos)
+    ? TEMPLATES.combos
+    : Array.isArray(ME?.combos) ? ME.combos : [];
+  const offered = accessibleToolIds(models);
+  const tools = dashboardToolNodes(offered);
+  const toolIndex = new Map(tools.map((tool, index) => [tool.key, index]));
+  const links = [];
+  models.forEach((model, modelIndex) => {
+    for (const client of desktopClients(model)) {
+      const keys = client === CODEX ? [CODEX_CLI_PRODUCT, CODEX_DESKTOP_PRODUCT] : [client];
+      for (const key of keys) {
+        if (toolIndex.has(key)) links.push([modelIndex, toolIndex.get(key)]);
+      }
+    }
+  });
+
+  CONNECTION_MAP = CONNECTION_MAP?.destroy?.() || null;
+  CONNECTION_MAP = new window.CiziBaglantiHaritasi(root, {
+    autoplay: true,
+    speed: 1.55,
+    data: {
+      provider: { name: "Cizi Code", status: "", icon: "cloud" },
+      models: models.map((model) => ({ name: displayModelName(modelName(model)), meta: "Erişilebilir" })),
+      tools: tools.map((tool) => ({ name: tool.name, icon: tool.icon })),
+      links,
+    },
+  });
+
+  const titles = root.querySelectorAll(".cbh__coltitle");
+  if (titles[0]) titles[0].textContent = "Kalan kullanım";
+  if (titles[1]) titles[1].textContent = "Erişilebilir modeller";
+  if (titles[2]) titles[2].textContent = "Araçlar";
+
+  const provider = root.querySelector(".cbh__card--provider");
+  if (provider) {
+    provider.append(...tankElements());
+    updateUsageTank();
+  }
+
+  // Kablo uçlarındaki pinler animasyonun ortasında (1.8 sn) doğuyor ve o anki
+  // ölçüme göre yerleşiyor. Kolon genişlikleri ise daha geç kesinleşiyor:
+  // grafik çizilince dikey kaydırma çubuğu geliyor, yazı tipi sonra yükleniyor.
+  // Ölçüm tazelenmezse pin kartın kenarına değil "Erişilebilir" yazısının
+  // üstüne düşüyor. Animasyon oturduğunda son bir kez ölçülür.
+  const relayout = () => CONNECTION_MAP?.layout?.();
+  root.addEventListener("cbh:settled", relayout, { once: true });
+  requestAnimationFrame(() => requestAnimationFrame(relayout));
+  document.fonts?.ready?.then(relayout);
+
+  const byStatus = new Map(LAST_TOOL_STATUSES.map((status) => [status.id, status]));
+  renderMapSummary(tools, byStatus);
+  CONNECTION_MAP.toolCards.forEach((toolCard, index) => {
+    const tool = tools[index];
+    if (!tool) return;
+    toolCard.tabIndex = 0;
+    toolCard.role = "button";
+    toolCard.dataset.cliId = `screen.config.${tool.key}`;
+    toolCard.dataset.cliLabel = `${tool.name} yapılandırmasını aç`;
+    toolCard.title = `${tool.name} yapılandırma ekranını aç`;
+    const status = byStatus.get(tool.switchId);
+    const dot = toolCard.querySelector(".cbh__dot");
+    if (dot && (!localToolInstalled(tool.switchId) || status?.blocked)) dot.classList.add("cbh__dot--muted");
+    const open = () => showAppScreen("config", tool.switchId);
+    toolCard.addEventListener("click", open);
+    toolCard.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
+function emptyState(title, detail) {
+  const element = document.createElement("div");
+  element.className = "empty-state";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const text = document.createElement("span");
+  text.textContent = detail;
+  element.append(heading, text);
+  return element;
+}
+
+// Üç araç var. Bir liste + detay bölmesi ekranın yarısını boş bırakıyor ve
+// kullanıcıyı hiçbir şey kazandırmayan bir seçim adımına zorluyordu; hepsi
+// aynı anda, tek sütunda duruyor.
+function renderConfigDetail() {
+  const list = $("tools-list");
+  if (!list) return;
+  const models = TEMPLATES?.combos || [];
+  const offered = accessibleToolIds(models);
+  const byStatus = new Map(LAST_TOOL_STATUSES.map((status) => [status.id, status]));
+  if (!SELECTED_TOOL_ID || !offered.includes(SELECTED_TOOL_ID)) SELECTED_TOOL_ID = offered[0] || null;
+  list.innerHTML = "";
+
+  if (!offered.length) {
+    list.appendChild(emptyState(
+      "Yapılandırılabilir araç yok",
+      models.length
+        ? "Hesabınızdaki modeller yerel bir araca bağlanmıyor. Yeni bir araç eklendiğinde burada görünür."
+        : "Bu profile henüz model tanımlanmamış. Yenile'ye basarak hesabınızı tekrar okuyabilirsiniz.",
+    ));
+    return;
+  }
+
+  for (const toolId of offered) {
+    const status = byStatus.get(toolId);
+    if (!status) {
+      list.appendChild(emptyState(NAMES[toolId], "Araç durumu henüz okunamadı. Yenile'ye basın."));
+      continue;
+    }
+    list.appendChild(CARDS[toolId](status, modelsForTool(models, toolId)));
+  }
+  for (const scope of PROGRESS.keys()) paintLane(scope);
+}
+
 // -------------------------------------------------------------- durum okuma
 
 async function loadTools() {
@@ -395,6 +658,7 @@ async function loadTools() {
   CLAUDE_STATE = claude?.ok ? (claude.data || CLAUDE_STATE) : { cli: { installed: false }, desktop: { installed: false } };
   CODEX_STATE = codex?.ok ? (codex.data || CODEX_STATE) : CODEX_STATE;
   TEMPLATES = { combos: Array.isArray(ME?.combos) ? ME.combos : [] };
+  LAST_TOOL_STATUSES = tools.ok ? (tools.data || []) : [];
   renderTools(tools.ok ? tools.data : []);
 }
 
@@ -492,8 +756,8 @@ function splitButton({ main, menuAlign = "left", onOpen }) {
   const mainButton = button({ ...main, className: `${main.className || "ghost tiny-btn"} split-main` });
   const toggle = document.createElement("button");
   toggle.type = "button";
-  toggle.className = "split-toggle";
-  toggle.textContent = "▾";
+  toggle.className = "ghost tiny-btn split-toggle";
+  toggle.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>';
   toggle.setAttribute("aria-haspopup", "true");
   toggle.setAttribute("aria-expanded", "false");
   toggle.dataset.cliId = `${main.cliId}.more`;
@@ -879,9 +1143,14 @@ async function toggleSwitch(checkbox, { switchId, models }) {
 function card({ switchId, title, state, fact, models, family, actions, extra }) {
   const root = document.createElement("div");
   root.className = `card state-${state.key}`;
+  root.dataset.toolId = switchId;
 
   const head = document.createElement("div");
   head.className = "card-head";
+  const icon = document.createElement("span");
+  icon.className = "tool-icon";
+  icon.innerHTML = TOOL_ICON_SVG[switchId === CLAUDE_CODE ? "cli" : "app"];
+  head.appendChild(icon);
   const titleBox = document.createElement("div");
   titleBox.className = "card-title";
   const heading = document.createElement("h3");
@@ -1364,40 +1633,13 @@ const CARDS = {
 };
 
 function renderTools(statuses) {
-  const list = $("tools-list");
   closeMenu();
-  list.innerHTML = "";
-
+  LAST_TOOL_STATUSES = Array.isArray(statuses) ? statuses : [];
   const models = TEMPLATES?.combos || [];
-  // Sunucunun her model profiline yazdığı desktopClients alanı tek erişim
-  // kaynağıdır. Model adı, aile anahtar kelimesi veya yerel allow-list yoktur.
   const offered = accessibleToolIds(models);
-
-  if (!offered.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = models.map(modelName).filter(Boolean).length
-      ? "Sunucu bu profil için erişilebilir bir yerel araç bildirmedi."
-      : "Bu anahtar için yerel araç bulunmuyor.";
-    list.appendChild(empty);
-    return;
-  }
-
-  const byId = new Map((statuses || []).map((status) => [status.id, status]));
-  for (const switchId of offered) {
-    const status = byId.get(switchId);
-    if (!status) continue;
-    list.appendChild(CARDS[switchId](status, modelsForTool(models, switchId)));
-  }
-
-  if (!list.children.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "Eşleşen yerel araç bulunamadı.";
-    list.appendChild(empty);
-  }
-  // Kart yeniden çizildiğinde süren bir iş varsa şeridi geri boya.
-  for (const scope of PROGRESS.keys()) paintLane(scope);
+  if (!SELECTED_TOOL_ID || !offered.includes(SELECTED_TOOL_ID)) SELECTED_TOOL_ID = offered[0] || null;
+  renderConnectionMap();
+  renderConfigDetail();
 }
 
 // ---------------------------------------------------------------- güncelleme
@@ -1419,6 +1661,10 @@ async function refreshUpdateState() {
 $("login-btn").addEventListener("click", doLogin);
 $("login-key").addEventListener("keydown", (event) => { if (event.key === "Enter") doLogin(); });
 
+$("screen-dashboard").addEventListener("click", () => showAppScreen("dashboard"));
+$("screen-config").addEventListener("click", () => showAppScreen("config"));
+$("open-config").addEventListener("click", () => showAppScreen("config"));
+
 $("logout-btn").addEventListener("click", async () => {
   clog("info", "Çıkış yapıldı");
   await cizi.logout();
@@ -1429,14 +1675,15 @@ $("period-select").addEventListener("change", (event) => loadUsage(event.target.
 
 $("usage-refresh").addEventListener("click", async () => {
   const target = $("usage-refresh");
-  const original = target.textContent;
+  const label = target.querySelector("span");
+  const original = label?.textContent || "Yenile";
   target.disabled = true;
-  target.textContent = "Yenileniyor...";
+  if (label) label.textContent = "Yenileniyor";
   try {
     await refreshAll();
     toast("Bilgiler yenilendi.", "good");
   } finally {
-    target.textContent = original;
+    if (label) label.textContent = original;
     target.disabled = false;
   }
 });
@@ -1485,7 +1732,10 @@ $("update-install").addEventListener("click", async () => {
 
 window.addEventListener("resize", () => {
   clearTimeout(window.__ciziChartTimer);
-  window.__ciziChartTimer = setTimeout(() => loadUsage($("period-select").value), 200);
+  window.__ciziChartTimer = setTimeout(() => {
+    CONNECTION_MAP?.layout?.();
+    if (CURRENT_SCREEN === "dashboard") drawChart(LAST_USAGE_SERIES);
+  }, 180);
 });
 
 // Anahtar çevirmenin adımları. Şeridin başlığı adımı söyler, mesajı ayrıntıyı.

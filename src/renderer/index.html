@@ -1,101 +1,129 @@
 <!DOCTYPE html>
-<html lang="tr">
+<html lang="tr" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src *; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
   <title>Cizi Code</title>
+  <link rel="stylesheet" href="../../ui_element_animation/baglanti-haritasi.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <section id="login-view" class="view login-view">
     <div class="login-card">
-      <div class="brand">
+      <div class="login-brand">
         <img class="brand-mark" src="../../assets/logo.png" alt="" />
         <div>
           <h1>Cizi Code</h1>
-          <p class="muted">Kodlama araçlarınızı tek anahtarla bağlayın</p>
+          <p>Yerel kodlama araçlarınızı hesabınıza bağlayın.</p>
         </div>
       </div>
-      <label for="login-key">API Anahtarı</label>
+      <label for="login-key">API anahtarı</label>
       <input id="login-key" data-cli-id="login-key" type="password" placeholder="sk-cizi-..." autocomplete="off" />
-      <button id="login-btn" data-cli-id="login-btn" class="primary block">Giriş Yap</button>
+      <button id="login-btn" data-cli-id="login-btn" class="primary block">Giriş yap</button>
       <p id="login-error" class="error hidden"></p>
-      <p class="muted tiny">Cizi Code hesabınızla giriş yapılır.</p>
+      <p class="muted tiny">Anahtarınız yalnızca bu bilgisayarda saklanır ve hesabınıza bağlanmak için kullanılır.</p>
     </div>
   </section>
 
-  <section id="dash-view" class="view hidden">
+  <section id="dash-view" class="view app-shell hidden">
     <header class="topbar">
-      <div class="brand compact">
-        <img class="brand-mark" src="../../assets/logo.png" alt="" />
-        <span class="brand-name">Cizi Code</span>
+      <nav class="screen-tabs" aria-label="Ekranlar">
+        <button id="screen-dashboard" data-cli-id="screen.dashboard" class="screen-tab is-active" type="button" aria-pressed="true">
+          Panel
+        </button>
+        <button id="screen-config" data-cli-id="screen.config" class="screen-tab" type="button" aria-pressed="false">
+          Yapılandırma
+        </button>
+      </nav>
+
+      <div class="topbar-right">
+        <div class="topbar-brand">
+          <img class="brand-mark" src="../../assets/logo.png" alt="" />
+          <div class="brand-copy">
+            <span class="brand-name">Cizi Code</span>
+            <span id="conn-base" class="gateway-label">Cizi Code Cloud</span>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <button id="usage-refresh" data-cli-id="usage-refresh" class="header-action" title="Hesap ve kullanım bilgilerini yenile">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.6-4.5L3 9m0-5v5h5M4 13a8 8 0 0 0 14.6 4.5L21 15m0 5v-5h-5"/></svg>
+            <span>Yenile</span>
+          </button>
+          <button id="update-check" data-cli-id="update-check" class="header-action" title="Cizi Code güncellemesi var mı">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12 4 4m-4-4L8 7M5 15v4h14v-4"/></svg>
+            <span>Güncelle</span>
+          </button>
+          <button id="logout-btn" data-cli-id="logout-btn" class="header-action">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5m5-3 4-4-4-4m4 4H9"/></svg>
+            <span>Çıkış</span>
+          </button>
+        </div>
       </div>
-      <span id="conn-base" class="gateway-chip">Cizi Code Cloud</span>
-
-      <div class="topbar-spacer"></div>
-
-      <!-- Kalan kullanım artık dikey yer kaplayan bir halka değil: ekranın asıl
-           konusu bağlantı kartları, kullanım ise tek bakışta okunan bir şerit. -->
-      <div class="meter" id="quota-meter" title="Kalan kullanım hakkınız">
-        <span class="meter-label">Kalan</span>
-        <span class="meter-track"><span id="quota-fill" class="meter-fill"></span></span>
-        <span id="quota-pct" class="meter-value">--%</span>
-      </div>
-
-      <button id="usage-refresh" data-cli-id="usage-refresh" class="ghost icon-btn" title="Hesap ve kullanım bilgilerini yenile">Yenile</button>
-      <button id="update-check" data-cli-id="update-check" class="ghost icon-btn" title="Cizi Code güncellemesi var mı">Güncelleme</button>
-      <button id="logout-btn" data-cli-id="logout-btn" class="ghost icon-btn">Çıkış</button>
     </header>
 
     <div id="update-banner" class="banner hidden">
       <span id="update-message"></span>
-      <button id="update-install" data-cli-id="update-install" class="primary tiny-btn hidden">Yeniden Başlat ve Kur</button>
+      <button id="update-install" data-cli-id="update-install" class="primary compact-btn hidden">Yeniden başlat ve kur</button>
     </div>
-
     <p id="limit-msg" class="banner bad hidden"></p>
 
-    <main class="content">
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>Bağlantılar</h2>
-            <p class="panel-note" id="tools-note">Anahtarı açtığınızda ayarlarınızın yedeği alınır; kapattığınızda birebir geri yüklenir.</p>
+    <main class="app-content">
+      <section id="dashboard-screen" class="app-screen dashboard-screen">
+        <section class="panel connection-panel">
+          <div class="panel-head">
+            <p id="map-summary" class="panel-summary">Bağlantılar okunuyor</p>
+            <button id="open-config" data-cli-id="screen.config.open" class="header-action" type="button" title="Araçları kur, bağla veya kaldır">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12M6 16h12"/><circle cx="9.5" cy="8" r="2.2"/><circle cx="14.5" cy="16" r="2.2"/></svg>
+              <span>Bağlantıları yönet</span>
+            </button>
           </div>
-          <button id="tool-reconcile-all" data-cli-id="tool.reconcile-all" data-cli-await="long" data-cli-await-timeout="120000" class="ghost tiny-btn" title="Her bağlantıyı gerçek ayar dosyalarıyla karşılaştırır ve eksikleri tamamlar">Bağlantıları doğrula</button>
-        </div>
-        <div id="tools-list" class="cards"></div>
-      </section>
+          <div id="connection-map" aria-label="Model ve araç bağlantı haritası"></div>
+        </section>
 
-      <section class="panel split-panel">
-        <div class="subpanel">
-          <div class="panel-head tight">
-            <h3>Kullanılabilir Modeller</h3>
-          </div>
-          <div id="model-chips" class="chips"></div>
-        </div>
-
-        <div class="subpanel">
-          <div class="panel-head tight">
-            <h3>Kullanım Eğilimi</h3>
+        <section class="panel usage-chart-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Kullanım eğilimi</h2>
+              <p id="usage-updated" class="panel-summary">Henüz yenilenmedi</p>
+            </div>
             <select id="period-select" data-cli-id="period-select" class="select" aria-label="Dönem">
               <option value="today">Bugün</option>
-              <option value="7d">7 Gün</option>
-              <option value="30d" selected>30 Gün</option>
-              <option value="60d">60 Gün</option>
+              <option value="7d">7 gün</option>
+              <option value="30d" selected>30 gün</option>
+              <option value="60d">60 gün</option>
             </select>
           </div>
           <canvas id="usage-chart" height="150"></canvas>
-          <p class="muted tiny" id="usage-updated">Henüz yenilenmedi</p>
+        </section>
+      </section>
+
+      <section id="config-screen" class="app-screen config-screen hidden">
+        <div class="config-head">
+          <div>
+            <h2>Yerel araçlar</h2>
+            <p class="panel-summary">Kurun, hesabınıza bağlayın veya bilgisayarınızdan kaldırın. Bağlantıyı kapattığınızda özgün ayarlarınız geri yüklenir.</p>
+          </div>
+          <button id="tool-reconcile-all" data-cli-id="tool.reconcile-all" data-cli-await="long" data-cli-await-timeout="120000" class="ghost compact-btn" title="Her bağlantıyı gerçek ayar dosyalarıyla karşılaştırır ve eksikleri tamamlar">
+            Bağlantıları doğrula
+          </button>
         </div>
+        <div id="tools-list" class="tool-stack"></div>
       </section>
     </main>
   </section>
 
+  <div id="model-chips" class="hidden" aria-hidden="true"></div>
+  <div id="quota-meter" class="hidden" aria-hidden="true">
+    <span id="quota-fill"></span><span id="quota-pct"></span>
+  </div>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
   <script src="cliUi.js"></script>
   <script src="toolAccess.js"></script>
   <script src="modelCapabilities.js"></script>
+  <script src="../../ui_element_animation/baglanti-haritasi.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

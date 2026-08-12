@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>Cizi Code — Aktif Bağlantı Haritası</title>
+<link rel="stylesheet" href="baglanti-haritasi.css">
+<style>
+  /* Sadece demo kabuğu — üretimde gerekmez */
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #19222d;
+    color: #e8eef6;
+    font-family: Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: grid;
+    place-items: center;
+    padding: 28px;
+    box-sizing: border-box;
+  }
+  .shell { width: min(1080px, 100%); }
+  .bar { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; }
+  .bar button, .bar select {
+    background: #222c39; color: #d6dfea;
+    border: 1px solid #333e4c; border-radius: 7px;
+    padding: 7px 12px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .bar button:hover { border-color: #4a5766; }
+  .bar span { font-size: 12px; color: #7d8b9c; margin-left: auto; }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <div class="bar">
+      <button id="replay">Tekrar oynat</button>
+      <button id="skip">Sonuca atla</button>
+      <select id="speed">
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2×</option>
+      </select>
+      <span id="stat">oynatılıyor…</span>
+    </div>
+
+    <div id="harita"></div>
+  </div>
+
+<script src="baglanti-haritasi.js"></script>
+<script>
+  var host = document.getElementById('harita');
+  var stat = document.getElementById('stat');
+  var map;
+
+  function mount(speed) {
+    if (map) map.destroy();
+    map = new CiziBaglantiHaritasi(host, {
+      speed: speed || 1,
+      // Veriyi buradan besle — gerçek uygulamada IPC/state'ten gelir.
+      data: {
+        provider: { name: 'Cloud', status: 'Bağlı', icon: 'cloud' },
+        models: [
+          { name: 'Opus 5',     meta: '4 model' },
+          { name: 'Sol 5.6',    meta: '3 model' },
+          { name: 'Terra',      meta: '3 model' },
+          { name: 'Laguna 2.1', meta: '2 model' }
+        ],
+        tools: [
+          { name: 'Claude Code CLI', icon: 'cli' },
+          { name: 'Claude Desktop',  icon: 'app' },
+          { name: 'Codex CLI',       icon: 'cli' },
+          { name: 'Codex Desktop',   icon: 'app' }
+        ],
+        links: [[0,3],[1,2],[2,1],[3,0]]
+      }
+    });
+    stat.textContent = 'oynatılıyor…';
+  }
+
+  host.addEventListener('cbh:settled', function () { stat.textContent = 'bağlantılar aktif'; });
+
+  document.getElementById('replay').onclick = function () { map.replay(); stat.textContent = 'oynatılıyor…'; };
+  document.getElementById('skip').onclick   = function () { map.settle(); };
+  document.getElementById('speed').onchange = function (e) { mount(parseFloat(e.target.value)); };
+
+  mount(1);
+</script>
+</body>
+</html>

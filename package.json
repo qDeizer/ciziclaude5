@@ -27,7 +27,8 @@
     "productName": "Cizi Code",
     "files": [
       "src/**/*",
-      "assets/**/*"
+      "assets/**/*",
+      "ui_element_animation/**/*"
     ],
     "asarUnpack": [
       "src/main/tools/claudeBranding/**/*"
