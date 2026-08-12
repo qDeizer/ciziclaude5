@@ -228,7 +228,7 @@ button:disabled { opacity: .4; cursor: default; }
 
 /* Panel kenarları ile kartlar arasında ölü alan bırakmamak için içerik tam
    genişlikte akar; kolonlar 1fr ile paneli doldurur. */
-.app-content { flex: 1; position: relative; min-height: 0; overflow: auto hidden; padding: 12px 14px 14px; }
+.app-content { flex: 1; position: relative; min-height: 0; overflow: hidden; padding: 12px 14px 14px; }
 .app-screen { width: 100%; }
 /* Harita kendi boyunda kalır, grafik artan yeri doldurur: sabit yükseklikli bir
    grafik, uzun pencerede altında ölü bir bant bırakıyordu. */
@@ -277,25 +277,29 @@ button:disabled { opacity: .4; cursor: default; }
   --cbh-dim: var(--ink-dim);
   --cbh-wire: 249 115 22;
   --cbh-wire-hot: 255 178 122;
-  --cbh-pulse: #ffe3c6;
+  --cbh-pulse: #ff9d1c;
+  --cbh-pulse-glow: 255 120 0;
   --cbh-ok: var(--good);
-  --cbh-card-h: 42px;
-  --cbh-row-gap: 7px;
+  --cbh-card-h: 38px;
+  --cbh-row-gap: 6px;
   --cbh-col-w: 150px;
-  --cbh-col-gap: clamp(52px, 6.5vw, 118px);
+  --cbh-data-col-w: clamp(252px, 29vw, 320px);
   --cbh-radius: var(--r-md);
-  padding: 12px 14px 14px;
+  padding: 8px 12px 10px;
   background: transparent;
   border-radius: 0;
   font-family: var(--font);
 }
 #connection-map .cbh__head { display: none; }
 
-/* Kolonlar paneli doldurur; kablolara çaprazlama için sabit bir orta boşluk
-   kalır. */
+/* Kart yüzeyi içeriğe göre sınırlı kalır. Kolonlar panelin iki kenarına
+   dağıtılır; kalan alan kartların içinde ölü boşluk olmak yerine kablo sahnesi
+   olur. */
 #connection-map .cbh__stage {
-  grid-template-columns: var(--cbh-col-w) minmax(220px, 1fr) minmax(220px, 1fr);
-  row-gap: 8px;
+  grid-template-columns: var(--cbh-col-w) var(--cbh-data-col-w) var(--cbh-data-col-w);
+  justify-content: space-between;
+  column-gap: 0;
+  row-gap: 6px;
 }
 #connection-map .cbh__coltitle {
   color: var(--ink-dim);
@@ -310,7 +314,7 @@ button:disabled { opacity: .4; cursor: default; }
 
 #connection-map .cbh__card { box-shadow: none; }
 #connection-map .cbh__card--model,
-#connection-map .cbh__card--tool { gap: 9px; padding: 0 12px; }
+#connection-map .cbh__card--tool { gap: 8px; padding: 0 10px; }
 #connection-map .cbh__mname,
 #connection-map .cbh__tname { font-size: 12.5px; font-weight: 500; }
 #connection-map .cbh__meta { font-size: 11px; }
@@ -326,12 +330,12 @@ button:disabled { opacity: .4; cursor: default; }
 
 /* Hiçbir yerel araca bağlanmayan model: listede kalır ama bağlı olanların
    ağırlığını taşımaz — daha ince ve soluk. */
-#connection-map .cbh__card--model.is-unlinked { height: 32px; }
+#connection-map .cbh__card--model.is-unlinked { height: 28px; }
 #connection-map .cbh__card--model.is-unlinked .cbh__mname,
 #connection-map .cbh__card--model.is-unlinked .cbh__meta { color: var(--ink-dim); }
 #connection-map .cbh__card--model.is-unlinked .cbh__icon--model { opacity: .4; }
 
-#connection-map .cbh__card--tool { cursor: pointer; padding-right: 28px; }
+#connection-map .cbh__card--tool { min-height: 44px; cursor: pointer; padding-right: 28px; }
 #connection-map .cbh__card--tool:hover { background: #1a2836; border-color: var(--line-strong); }
 #connection-map .cbh__card--tool::after {
   content: "";
@@ -368,6 +372,15 @@ button:disabled { opacity: .4; cursor: default; }
   height: var(--quota-level, 100%);
   background: linear-gradient(180deg, var(--tank-liquid-a), var(--tank-liquid-b));
   transition: height 800ms var(--ease), background 400ms var(--ease);
+}
+.usage-tank-entering .tank-liquid {
+  animation: tank-fill-entry var(--tank-entry-duration, 1400ms) var(--ease)
+    var(--tank-entry-delay, 0ms) both;
+  transition: none;
+}
+@keyframes tank-fill-entry {
+  from { height: 0; }
+  to { height: var(--quota-level, 100%); }
 }
 .tank-wave {
   position: absolute;
@@ -693,7 +706,7 @@ button:disabled { opacity: .4; cursor: default; }
 
 /* ------------------------------------------------ yapısal duyarlılık */
 @media (max-width: 1120px) {
-  #connection-map.cbh { --cbh-col-gap: 46px; --cbh-col-w: 136px; }
+  #connection-map.cbh { --cbh-col-w: 136px; }
   .config-screen { grid-template-columns: 210px minmax(0, 1fr); }
   .card-models { display: none; }
 }
@@ -702,7 +715,7 @@ button:disabled { opacity: .4; cursor: default; }
   .topbar-actions .header-action span { display: none; }
   .header-action { padding: 0 8px; }
   .screen-tab { min-width: 112px; padding: 0 16px; }
-  #connection-map.cbh { --cbh-col-gap: 36px; --cbh-col-w: 126px; }
+  #connection-map.cbh { --cbh-col-w: 126px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -20,7 +20,8 @@
 
   --cbh-wire:       249 115 22;    /* #f97316 — rgb komponent, opacity için */
   --cbh-wire-hot:   255 178 122;
-  --cbh-pulse:      #ffe3c6;
+  --cbh-pulse:      #ff9d1c;
+  --cbh-pulse-glow: 255 120 0;
   --cbh-ok:         #34d399;
 
   /* --- geometri (videodaki oranlar) --- */
@@ -332,7 +333,11 @@
   stroke-width: var(--cbh-pulse-w);
   stroke-linecap: round;
   opacity: 0;
-  filter: drop-shadow(0 0 4px rgb(var(--cbh-wire-hot) / .9));
+  /* Parçanın çekirdeği ve halesi kablodan daha doygun turuncudur; kablonun
+     tamamını ışık şeridine dönüştürmeyecek kadar kısa tutulur. */
+  filter:
+    drop-shadow(0 0 2px rgb(var(--cbh-pulse-glow) / .95))
+    drop-shadow(0 0 6px rgb(var(--cbh-pulse-glow) / .7));
 }
 .cbh--settled .cbh__wire-pulse { opacity: 1; }
 

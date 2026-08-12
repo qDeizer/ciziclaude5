@@ -59,6 +59,9 @@ let CURRENT_SCREEN = "dashboard";
 let SELECTED_TOOL_ID = null;
 let CONNECTION_MAP = null;
 let QUOTA_VIEW = { percent: 100, unlimited: true, label: "∞" };
+let HAS_ANIMATED_USAGE_TANK = false;
+
+const USAGE_TANK_ENTRY_MS = 1400;
 
 // ----------------------------------------------------------------- yardımcı
 
@@ -324,7 +327,6 @@ function renderModels(models) {
     chip.className = "chip empty";
     chip.textContent = "Henüz model yok";
     box.appendChild(chip);
-    renderConnectionMap();
     return;
   }
   for (const model of models) {
@@ -344,7 +346,6 @@ function renderModels(models) {
       + ` · düşünme seviyeleri: ${profile.reasoningLevels.join(", ")}`;
     box.appendChild(chip);
   }
-  renderConnectionMap();
 }
 
 async function loadUsage(period) {
@@ -509,7 +510,7 @@ function tankElements() {
   return [liquid, brand, value];
 }
 
-function updateUsageTank() {
+function updateUsageTank({ animateFromEmpty = false, animationDelayMs = 0 } = {}) {
   const provider = document.querySelector("#connection-map .cbh__card--provider");
   if (!provider) return;
   const { percent, unlimited, label } = QUOTA_VIEW;
@@ -517,10 +518,25 @@ function updateUsageTank() {
   provider.classList.toggle("usage-unlimited", unlimited);
   if (!unlimited && percent <= 10) provider.classList.add("usage-bad");
   else if (!unlimited && percent <= 30) provider.classList.add("usage-warn");
-  // Sıvı tavana dayanmaz. İki sebep: tepeye kadar dolu tankta dalga kırpılıp
-  // tank cansız bir levhaya dönüşüyor, ve logo + marka şeridi su yüzeyinin
-  // altında kalıyordu. Seviyeyi sayı taşıdığı için tavan okumayı bozmaz.
-  provider.style.setProperty("--quota-level", `${Math.min(percent, 80)}%`);
+  // Etiket ile görsel seviye aynı değeri anlatır: %100 tankı gerçekten tam
+  // doldurur. Sınırlar dış kaynaktan beklenmedik bir değer gelmesine karşıdır.
+  const quotaLevel = Math.max(0, Math.min(100, percent));
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const shouldAnimateFromEmpty = animateFromEmpty && !HAS_ANIMATED_USAGE_TANK && !reducedMotion;
+  if (animateFromEmpty && !HAS_ANIMATED_USAGE_TANK) HAS_ANIMATED_USAGE_TANK = true;
+
+  provider.style.setProperty("--quota-level", `${quotaLevel}%`);
+  if (shouldAnimateFromEmpty) {
+    const safeDelayMs = Math.max(0, Number(animationDelayMs) || 0);
+    provider.style.setProperty("--tank-entry-duration", `${USAGE_TANK_ENTRY_MS}ms`);
+    provider.style.setProperty("--tank-entry-delay", `${safeDelayMs}ms`);
+    provider.classList.add("usage-tank-entering");
+    setTimeout(() => {
+      provider.classList.remove("usage-tank-entering");
+      provider.style.removeProperty("--tank-entry-duration");
+      provider.style.removeProperty("--tank-entry-delay");
+    }, safeDelayMs + USAGE_TANK_ENTRY_MS + 100);
+  }
   const value = provider.querySelector(".tank-value");
   if (value) value.textContent = label;
   provider.title = unlimited
@@ -558,9 +574,13 @@ function renderConnectionMap() {
     speed: 1.55,
     // Enerji akışı üç kat yavaş: hız kabloyu bir ışık şeridine çeviriyordu.
     pulseSpeed: 63,
-    // Kablonun kıvrıma girmeden önceki düz payı üçte bir kısaltıldı.
-    leadOut: 9,
-    leadIn: 17,
+    // Hem gerçek düz parçayı hem Bézier'in yatay kontrol kollarını kısalt.
+    // Yalnızca lead değerlerini azaltmak, eğrinin gözle hâlâ uzun süre düz
+    // ilerlemesine yol açıyordu.
+    leadOut: 6,
+    leadIn: 11,
+    bendMin: 18,
+    bendRatio: 0.5,
     data: {
       provider: { name: "Cizi Code", status: "", icon: "cloud" },
       models: models.map((model, index) => ({
@@ -580,7 +600,9 @@ function renderConnectionMap() {
   const provider = root.querySelector(".cbh__card--provider");
   if (provider) {
     provider.append(...tankElements());
-    updateUsageTank();
+    const providerEntryDelay = Number(CONNECTION_MAP.t?.providerIn || 0)
+      / Math.max(0.1, Number(CONNECTION_MAP.o?.speed || 1));
+    updateUsageTank({ animateFromEmpty: true, animationDelayMs: providerEntryDelay });
   }
 
   CONNECTION_MAP.modelCards.forEach((modelCard, index) => {
