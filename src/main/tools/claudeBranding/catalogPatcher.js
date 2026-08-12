@@ -48,8 +48,8 @@ function escapeRegExp(value) {
 //      inferenceGatewayApiKey   inferenceGatewayAuthScheme
 //
 // Buna karsilik tireli GORUNUR metinler degistirilir:
-//   Inferenz-Gateway-Endpunkts  ->  Inferenz-Ağ Geçidi-Endpunkts
-//   Gateway-SSO-IdP             ->  Ağ Geçidi-SSO-IdP
+//   Inferenz-Gateway-Endpunkts  ->  Inferenz-Cizi Code-Endpunkts
+//   Gateway-SSO-IdP             ->  Cizi Code-SSO-IdP
 const URLISH = /:\/\/|\/|_|\\/;
 
 function enclosingToken(text, start, end) {

@@ -129,9 +129,13 @@ function createBuildService({
       // (b) dosyalar zaten markalanmis ama uretim kaydi kaybolmus (Cizi Code
       // yeniden kurulmus, userData temizlenmis...). (b)'de hedef terim dosyalarda
       // duruyordur; bunu hata saymak switch'i bosuna kilitlerdi.
+      // Gecerli terimlerin yaninda ESKI terimler de aranir: marka terimi
+      // degistiginde dosyalarda duran sey bizim onceki yamamizdir ve onu
+      // taniyamazsak "sozluk bos" gibi anlamsiz bir hataya duseriz.
       const brandTerms = (dictionary.labels.tokenRules || [])
         .map((rule) => rule.to)
         .concat(dictionary.labels.rules.map((rule) => rule.to))
+        .concat(dictionary.labels.retiredTerms || [])
         .filter(Boolean);
       const alreadyBranded = scanResult.labels.alreadyTranslated.length > 0
         || (brandTerms.length > 0 && scanResult.catalogs.some((catalog) => {
@@ -217,6 +221,19 @@ function createBuildService({
       throw codedError("BUILD_NOT_FOUND", `Bu surum icin stage edilmis yama yok: ${version}`);
     }
     const provenance = readJson(provenancePath);
+    // Uretim, uretildigi sozluge aittir.
+    //
+    // Provenance sozlugun hash'ini zaten tutuyordu ama kimse ona bakmiyordu:
+    // bir Claude surumu icin bir kez uretilen dosyalar, sozluk (ornegin marka
+    // terimi) sonradan degisse bile aynen uygulanmaya devam ediyordu. Yani yeni
+    // metin, o surumu daha once yamalamis hicbir makineye ulasmiyordu.
+    if (provenance.dictionary?.labelsSha256 !== sha256File(dictionaryPaths.labels)
+      || provenance.dictionary?.catalogSha256 !== sha256File(dictionaryPaths.catalog)) {
+      throw codedError(
+        "BUILD_DICTIONARY_CHANGED",
+        `Stage edilmis yama baska bir sozlukle uretilmis; yeniden uretilmeli: ${version}`,
+      );
+    }
     const stagedFiles = provenance.files.map((file) => {
       const stagedPath = path.join(versionRoot, "staged", file.relativePath.split("/").join(path.sep));
       if (!fs.existsSync(stagedPath)) {

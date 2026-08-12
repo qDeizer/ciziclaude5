@@ -1,6 +1,8 @@
 {
   "schemaVersion": 1,
   "locale": "tr-TR",
+  "retiredTerms": ["Ağ Geçidi"],
+  "retiredTermsNote": "Cizi Code'un DAHA ONCE kullandigi marka terimleri. Yalnizca teshis icin: uretilecek bir degisiklik kalmadiginda, dosyalarin bizim eski bir yamamizi tasiyip tasimadigini bunlardan anlariz. Metne asla bunlarla dokunulmaz. Marka terimi her degistiginde eskisi buraya eklenir.",
   "note": "Katalogda BULUNMAYAN, JS icine gomulu etiketler. Anthropic bunlari hicbir dile cevirmiyor (de-DE.json'da da Ingilizce kalirlar), bu yuzden byte yamasi gerekir. Hedef dosya adina gore DEGIL, objectKey + siblingMarkers baglamina gore bulunur. tokenRules ise butun dil kataloglarinda gecen marka terimini degistirir.",
   "rules": [
     {
@@ -8,7 +10,7 @@
       "description": "Saglayici kisa etiketi. Claude arayuzunde sol altta gorunen 'Gateway' yazisi.",
       "objectKey": "gateway",
       "from": "Gateway",
-      "to": "Ağ Geçidi",
+      "to": "Cizi Code",
       "siblingMarkers": [
         "Claude API",
         "Bedrock",
@@ -26,7 +28,7 @@
       "id": "brand-term-gateway",
       "description": "Marka terimi. BUTUN dil kataloglarinda ve bilesik kelimelerin icinde de uygulanir. Yalnizca URL/yol/tanimlayici gibi ISLEVSEL degerler korunur.",
       "from": "Gateway",
-      "to": "Ağ Geçidi",
+      "to": "Cizi Code",
       "caseSensitive": false
     }
   ]

@@ -2,7 +2,7 @@
 //
 // NE YAPAR
 // Kurulu resmi Claude Desktop paketinin i18n kataloglarindaki ve arayuz etiket
-// haritasindaki "Gateway" gecislerini "Ag Gecidi" ile degistirir. Paket
+// haritasindaki "Gateway" gecislerini "Cizi Code" ile degistirir. Paket
 // kimligine, imzasina ve kaydina dokunmaz; yalnizca metin iceren dosyalarin
 // icerigini yamalar ve her dosyanin orijinalini yedekler.
 //
@@ -30,6 +30,7 @@
 //   reconcileService-> "yama yerinde olsun" durumunu idempotent saglar
 //   lock            -> zamanlanmis gorev ile arayuz ayni anda yazamaz
 
+const fs = require("fs");
 const path = require("path");
 const { app } = require("electron");
 const logger = require("../logger");
@@ -46,7 +47,7 @@ const { createElevationRunner } = require("./claudeBranding/elevationRunner");
 const { createLock } = require("./claudeBranding/lock");
 const desiredState = require("./claudeBranding/desiredState");
 
-const BRAND_TERM = "Ağ Geçidi";
+const BRAND_TERM = "Cizi Code";
 const DICTIONARY_DIRECTORY = path.join(__dirname, "claudeBranding", "dictionary");
 
 function codedError(code, message, cause) {
@@ -107,7 +108,13 @@ function loadDictionary(directory = DICTIONARY_DIRECTORY) {
     throw codedError("CLAUDE_BRANDING_DICTIONARY_INVALID", "Arayuz sozlugunde etiket kurali yok.");
   }
   return {
-    labels: { rules: labels.rules, tokenRules: labels.tokenRules || [] },
+    labels: {
+      rules: labels.rules,
+      tokenRules: labels.tokenRules || [],
+      // Eski marka terimleri yalnizca "bu dosyalari daha once biz mi yamadik"
+      // sorusunu cevaplamak icin tasinir; metne onlarla dokunulmaz.
+      retiredTerms: Array.isArray(labels.retiredTerms) ? labels.retiredTerms : [],
+    },
     catalog: { entries: catalog?.entries || {} },
     paths: { labels: labelsPath, catalog: catalogPath },
   };
@@ -300,7 +307,13 @@ async function removeOwnedOrphanForMain(main, options = {}) {
   const parts = options.engine || engine();
   const packageInfo = toPackageInfo(main);
   const state = await inspect(main, { engine: parts });
-  if (!state.known || !state.files.some((file) => file.state === "patched")) {
+  // `known: false` "temiz" demek degildir: uretim kaydi bu sozlukle
+  // okunamiyor olabilir (marka terimi degismisse oyle olur) ve dosyalar hala
+  // eski yamayi tasiyor olabilir. O durumda karari yedek manifesti verir -
+  // hangi dosyanin geri konacagini bilen tek kayit odur. Yedek de yoksa
+  // gercekten yapacak bir sey yoktur ve yonetici onayi istenmez.
+  const hasBackup = fs.existsSync(parts.applyService.backupManifestPath(packageInfo.version));
+  if (state.known ? !state.files.some((file) => file.state === "patched") : !hasBackup) {
     return { removed: false, reason: "NOTHING_TO_REMOVE" };
   }
   if ((packageInfo.installKind || "msix") !== "squirrel" && !(await parts.elevation.isElevated())) {

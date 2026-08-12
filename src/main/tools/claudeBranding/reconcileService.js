@@ -24,7 +24,21 @@ function createReconcileService({ logger, buildService, applyService }) {
     let build = null;
     try {
       build = buildService.loadStaged(packageInfo.version);
-    } catch {
+    } catch (error) {
+      // Sozluk degistiyse canli dosyalar ESKI terimle yamali olabilir. Onlarin
+      // uzerine yeniden uretmek, eski ciktiyi kaynak metin sanmak olurdu; o
+      // yuzden once yedekten orijinallere donulur. Yedek yoksa restore zararsiz
+      // sekilde "geri yuklenecek sey yok" der.
+      if (error?.code === "BUILD_DICTIONARY_CHANGED" && confirm === true) {
+        const restored = await applyService.restore(packageInfo, { confirm });
+        if (restored.restored) {
+          steps.push("restore");
+          logger.info("reconcile", "Sozluk degisti; onceki yama geri alindi ve yeniden uretilecek", {
+            version: packageInfo.version,
+            files: restored.files?.length || 0,
+          });
+        }
+      }
       build = null;
     }
     if (!build) {

@@ -162,6 +162,16 @@ Koordinatör katmanı iki ürünü tek anahtar altında birleştirir:
   servis ikilisi hiçbir zaman hedef değildir. Servis kaydı okunamazsa eski katı
   davranışa düşülür. Gerçekten çalışan bir Claude Desktop hâlâ engeldir ve hata
   mesajı artık hangi sürecin engellediğini yazar.
+- **Marka terimi `Cizi Code`.** Claude arayüzündeki "Gateway" geçişleri — sol
+  alttaki sağlayıcı etiketi dahil, bütün dil kataloglarında — `Cizi Code` olarak
+  yazılır. URL, yol ve yapılandırma anahtarı gibi işlevsel değerler
+  (`api://gateway/.default`, `inferenceGatewayApiKey`) korunur.
+- **Sözlük değişirse üretim yeniden yapılır.** Bir Claude sürümü için üretilmiş
+  yama, üretildiği sözlüğün hash'i ile birlikte saklanıyordu ama kimse ona
+  bakmıyordu: marka terimi değiştiğinde o sürümü daha önce yamalamış makineler
+  eski metni uygulamaya devam ederdi. Artık sözlük değiştiğinde önce yedekten
+  orijinal dosyalara dönülür, sonra yeni sözlükle baştan üretilir — böylece yeni
+  terim eskisinin üzerine değil, Claude'un kendi metninin üzerine yazılır.
 
 Yardımcı dosyalar da taşındı: `src/main/bin/` içindeki
 `CiziClaudeCredentialHelper.exe` ve C# kaynak kodu.
