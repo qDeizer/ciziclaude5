@@ -39,11 +39,8 @@
 
       <div class="topbar-right">
         <div class="topbar-brand">
-          <img class="brand-mark" src="../../assets/logo.png" alt="" />
-          <div class="brand-copy">
-            <span class="brand-name">Cizi Code</span>
-            <span id="conn-base" class="gateway-label">Cizi Code Cloud</span>
-          </div>
+          <span class="brand-name">Cizi Code</span>
+          <span id="conn-base" class="gateway-label">Cizi Code Cloud</span>
         </div>
 
         <div class="topbar-actions">
@@ -88,21 +85,29 @@
               <option value="60d">60 gün</option>
             </select>
           </div>
-          <canvas id="usage-chart" height="150"></canvas>
+          <div class="chart-body"><canvas id="usage-chart"></canvas></div>
         </section>
       </section>
 
       <section id="config-screen" class="app-screen config-screen hidden">
-        <div class="config-head">
-          <div>
-            <h2>Yerel araçlar</h2>
-            <p class="panel-summary">Kurun, hesabınıza bağlayın veya bilgisayarınızdan kaldırın. Bağlantıyı kapattığınızda özgün ayarlarınız geri yüklenir.</p>
+        <aside class="config-rail">
+          <p class="rail-heading">Yerel araçlar</p>
+          <div id="config-tool-list" class="config-tool-list"></div>
+          <p class="rail-note">Bağlantıyı kapattığınızda özgün ayarlarınız geri yüklenir.</p>
+        </aside>
+
+        <section class="panel config-workspace">
+          <div class="panel-head">
+            <div>
+              <span class="workspace-label">Seçili araç</span>
+              <strong id="config-context-label">Araç seçin</strong>
+            </div>
+            <button id="tool-reconcile-all" data-cli-id="tool.reconcile-all" data-cli-await="long" data-cli-await-timeout="120000" class="ghost compact-btn" title="Her bağlantıyı gerçek ayar dosyalarıyla karşılaştırır ve eksikleri tamamlar">
+              Bağlantıları doğrula
+            </button>
           </div>
-          <button id="tool-reconcile-all" data-cli-id="tool.reconcile-all" data-cli-await="long" data-cli-await-timeout="120000" class="ghost compact-btn" title="Her bağlantıyı gerçek ayar dosyalarıyla karşılaştırır ve eksikleri tamamlar">
-            Bağlantıları doğrula
-          </button>
-        </div>
-        <div id="tools-list" class="tool-stack"></div>
+          <div id="tools-list" class="config-detail"></div>
+        </section>
       </section>
     </main>
   </section>

@@ -125,6 +125,10 @@
   position: absolute;
   inset: 0;
   z-index: 1;
+  /* Süs öğesi. `is-out` yalnızca opacity'yi sıfırlıyor, öğe DOM'da kalıyor ve
+     z-index 1 ile kartların üstünde duruyordu: araç kartlarının tıklanabilir
+     alanı, hayaletin ölçüsü dışında kalan birkaç piksellik şeride iniyordu. */
+  pointer-events: none;
   display: grid;
   place-items: center;
   border-radius: var(--cbh-radius);

@@ -107,6 +107,7 @@ function show(view) {
 }
 
 function showAppScreen(screen, selectedToolId = null) {
+  const previous = CURRENT_SCREEN;
   CURRENT_SCREEN = screen === "config" ? "config" : "dashboard";
   if (selectedToolId && SWITCH_IDS.includes(selectedToolId)) SELECTED_TOOL_ID = selectedToolId;
   $("dashboard-screen").classList.toggle("hidden", CURRENT_SCREEN !== "dashboard");
@@ -117,20 +118,22 @@ function showAppScreen(screen, selectedToolId = null) {
     tab.setAttribute("aria-pressed", String(active));
   }
   if (CURRENT_SCREEN === "config") renderConfigDetail();
+
+  // Ekranlar yan yana duruyormuş gibi kayarak girer: panel soldan, yapılandırma
+  // sağdan. Yön, gidilen ekranın sekme sırasındaki yerinden gelir.
+  if (previous !== CURRENT_SCREEN) {
+    const entering = $(CURRENT_SCREEN === "config" ? "config-screen" : "dashboard-screen");
+    const direction = CURRENT_SCREEN === "config" ? "enter-right" : "enter-left";
+    entering.classList.remove("enter-right", "enter-left");
+    void entering.offsetWidth; // animasyonu yeniden tetiklemek için reflow
+    entering.classList.add(direction);
+  }
+
   requestAnimationFrame(() => {
     if (CURRENT_SCREEN === "dashboard") {
       CONNECTION_MAP?.layout?.();
       drawChart(LAST_USAGE_SERIES);
-      return;
     }
-    // Dashboard'dan bir araca tıklanarak gelindiyse o kartın yanına gidilir;
-    // üç kart da ekranda olduğu için bir ayıklama listesine gerek yok.
-    if (!selectedToolId) return;
-    const target = document.querySelector(`.card[data-tool-id="${selectedToolId}"]`);
-    if (!target) return;
-    target.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    target.classList.add("is-target");
-    setTimeout(() => target.classList.remove("is-target"), 1600);
   });
 }
 
@@ -374,8 +377,9 @@ function chartValue(point) {
 
 function drawChart(data) {
   const canvas = $("usage-chart");
+  // Tuval artan alanı doldurduğu için yükseklik sabit değil, ölçülür.
   const width = canvas.clientWidth || canvas.parentElement.clientWidth || 320;
-  const height = 150;
+  const height = canvas.clientHeight || 104;
   const ratio = window.devicePixelRatio || 1;
   canvas.width = width * ratio;
   canvas.height = height * ratio;
@@ -486,9 +490,17 @@ function tankElements() {
   front.innerHTML = WAVE_SVG;
   liquid.append(back, front);
 
+  // Logo tankın üst kenarına oturur; üst bardaki kopyası kaldırıldı, marka tek
+  // yerde durur.
   const brand = document.createElement("span");
   brand.className = "tank-brand";
-  brand.textContent = "Cizi Code";
+  const logo = document.createElement("img");
+  logo.className = "tank-logo";
+  logo.src = "../../assets/logo.png";
+  logo.alt = "";
+  const brandText = document.createElement("span");
+  brandText.textContent = "Cizi Code";
+  brand.append(logo, brandText);
 
   // Yüzde su seviyesine biner (eskizdeki gibi). Konumu CSS'te clamp'lenir:
   // %100'de marka adının, %5'te tankın dibinin dışına taşardı.
@@ -506,10 +518,9 @@ function updateUsageTank() {
   if (!unlimited && percent <= 10) provider.classList.add("usage-bad");
   else if (!unlimited && percent <= 30) provider.classList.add("usage-warn");
   // Sıvı tavana dayanmaz. İki sebep: tepeye kadar dolu tankta dalga kırpılıp
-  // tank cansız bir levhaya dönüşüyor, ve marka adının oturduğu şerit su
-  // yüzeyiyle çakışıyordu. %88 tavanı her iki sorunu da kapatır, "dolu"
-  // algısını bozmaz.
-  provider.style.setProperty("--quota-level", `${Math.min(percent, 88)}%`);
+  // tank cansız bir levhaya dönüşüyor, ve logo + marka şeridi su yüzeyinin
+  // altında kalıyordu. Seviyeyi sayı taşıdığı için tavan okumayı bozmaz.
+  provider.style.setProperty("--quota-level", `${Math.min(percent, 80)}%`);
   const value = provider.querySelector(".tank-value");
   if (value) value.textContent = label;
   provider.title = unlimited
@@ -545,6 +556,11 @@ function renderConnectionMap() {
   CONNECTION_MAP = new window.CiziBaglantiHaritasi(root, {
     autoplay: true,
     speed: 1.55,
+    // Enerji akışı üç kat yavaş: hız kabloyu bir ışık şeridine çeviriyordu.
+    pulseSpeed: 63,
+    // Kablonun kıvrıma girmeden önceki düz payı üçte bir kısaltıldı.
+    leadOut: 9,
+    leadIn: 17,
     data: {
       provider: { name: "Cizi Code", status: "", icon: "cloud" },
       models: models.map((model, index) => ({
@@ -607,6 +623,43 @@ function renderConnectionMap() {
   });
 }
 
+function integrationStatusText(toolId, status) {
+  if (!localToolInstalled(toolId)) return { text: "Kurulu değil", tone: "is-absent" };
+  if (status?.blocked) return { text: "Dikkat gerekiyor", tone: "is-attention" };
+  if (status?.applied && status?.desiredEnabled !== false) return { text: "Bağlı", tone: "is-on" };
+  return { text: "Bağlı değil", tone: "" };
+}
+
+function renderConfigRail(offered, byStatus) {
+  const rail = $("config-tool-list");
+  if (!rail) return;
+  rail.innerHTML = "";
+  for (const toolId of offered) {
+    const selected = SELECTED_TOOL_ID === toolId;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `config-tool${selected ? " is-selected" : ""}`;
+    button.dataset.cliId = `config.tool.${toolId}`;
+    button.dataset.cliLabel = `${NAMES[toolId]} yapılandırmasını seç`;
+    button.setAttribute("aria-pressed", String(selected));
+
+    const icon = document.createElement("span");
+    icon.className = "config-tool-icon";
+    icon.innerHTML = TOOL_ICON_SVG[toolId === CLAUDE_CODE ? "cli" : "app"];
+    const name = document.createElement("span");
+    name.className = "config-tool-name";
+    name.textContent = NAMES[toolId];
+    const detail = integrationStatusText(toolId, byStatus.get(toolId));
+    const state = document.createElement("span");
+    state.className = `config-tool-status ${detail.tone}`;
+    state.textContent = detail.text;
+
+    button.append(icon, name, state);
+    button.addEventListener("click", () => showAppScreen("config", toolId));
+    rail.appendChild(button);
+  }
+}
+
 function emptyState(title, detail) {
   const element = document.createElement("div");
   element.className = "empty-state";
@@ -618,9 +671,6 @@ function emptyState(title, detail) {
   return element;
 }
 
-// Üç araç var. Bir liste + detay bölmesi ekranın yarısını boş bırakıyor ve
-// kullanıcıyı hiçbir şey kazandırmayan bir seçim adımına zorluyordu; hepsi
-// aynı anda, tek sütunda duruyor.
 function renderConfigDetail() {
   const list = $("tools-list");
   if (!list) return;
@@ -628,9 +678,11 @@ function renderConfigDetail() {
   const offered = accessibleToolIds(models);
   const byStatus = new Map(LAST_TOOL_STATUSES.map((status) => [status.id, status]));
   if (!SELECTED_TOOL_ID || !offered.includes(SELECTED_TOOL_ID)) SELECTED_TOOL_ID = offered[0] || null;
+  renderConfigRail(offered, byStatus);
   list.innerHTML = "";
 
-  if (!offered.length) {
+  if (!SELECTED_TOOL_ID) {
+    $("config-context-label").textContent = "Araç yok";
     list.appendChild(emptyState(
       "Yapılandırılabilir araç yok",
       models.length
@@ -640,14 +692,13 @@ function renderConfigDetail() {
     return;
   }
 
-  for (const toolId of offered) {
-    const status = byStatus.get(toolId);
-    if (!status) {
-      list.appendChild(emptyState(NAMES[toolId], "Araç durumu henüz okunamadı. Yenile'ye basın."));
-      continue;
-    }
-    list.appendChild(CARDS[toolId](status, modelsForTool(models, toolId)));
+  $("config-context-label").textContent = NAMES[SELECTED_TOOL_ID];
+  const status = byStatus.get(SELECTED_TOOL_ID);
+  if (!status) {
+    list.appendChild(emptyState(NAMES[SELECTED_TOOL_ID], "Araç durumu henüz okunamadı. Yenile'ye basın."));
+    return;
   }
+  list.appendChild(CARDS[SELECTED_TOOL_ID](status, modelsForTool(models, SELECTED_TOOL_ID)));
   for (const scope of PROGRESS.keys()) paintLane(scope);
 }
 

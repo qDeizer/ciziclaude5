@@ -530,8 +530,13 @@
           duration: dur,
           iterations: Infinity,
           easing: 'linear',
-          // aşamalara göre kayma: A demeti önce, B demeti hemen arkasından
-          delay: -((e.stage === 'A' ? 0 : dur * 0.42) + i * 370) % dur
+          // Kayma POZİTİF: her parça kablonun başından doğar.
+          //
+          // Negatif gecikme animasyonu ortasından başlatıyordu; kablolar
+          // bağlandığı anda ışık kabloların ortasında beliriyor, "enerji zaten
+          // akıyordu da biz görmüyorduk" izlenimi veriyordu. Akış artık
+          // kaynaktan başlar; A demeti önce, B demeti hemen arkasından.
+          delay: (e.stage === 'A' ? 0 : 220) + i * 140
         }
       );
       e._pulseAnim = a;
