@@ -326,6 +326,10 @@
 /* büyüme sırasında kablo "sıcak" (videodaki gibi tam parlak) */
 .cbh__wire-core.is-hot { stroke: rgb(var(--cbh-wire-hot) / .95); stroke-width: 1.9px; }
 .cbh__wire-glow.is-hot { stroke: rgb(var(--cbh-wire) / .5); }
+.cbh__wire-core.is-wire-installed { stroke: rgb(var(--cbh-wire) / .42); stroke-width: 1.35px; }
+.cbh__wire-glow.is-wire-installed { stroke: rgb(var(--cbh-wire) / .12); filter: blur(3px); }
+.cbh__wire-core.is-wire-absent { stroke: rgb(var(--cbh-wire) / .16); stroke-width: 1px; }
+.cbh__wire-glow.is-wire-absent { stroke: rgb(var(--cbh-wire) / .035); filter: blur(2px); }
 
 .cbh__wire-pulse {
   fill: none;
@@ -339,7 +343,7 @@
     drop-shadow(0 0 2px rgb(var(--cbh-pulse-glow) / .95))
     drop-shadow(0 0 6px rgb(var(--cbh-pulse-glow) / .7));
 }
-.cbh--settled .cbh__wire-pulse { opacity: 1; }
+.cbh--settled .cbh__wire-pulse.is-energy-active { opacity: 1; }
 
 /* --- pinler (kart kenarındaki turuncu noktalar) ------------------------ */
 .cbh__pin {
@@ -347,6 +351,8 @@
   filter: drop-shadow(0 0 5px rgb(var(--cbh-wire) / .85));
   opacity: 0;
 }
+.cbh__pin.is-wire-installed { fill: rgb(var(--cbh-wire) / .55); filter: none; }
+.cbh__pin.is-wire-absent { fill: rgb(var(--cbh-wire) / .25); filter: none; }
 
 /* --- provider bloom (yerleşme sonrası periyodik enerji dalgası) -------- */
 .cbh__bloom {
@@ -362,6 +368,7 @@
 .cbh--settled .cbh__bloom {
   animation: cbh-bloom 4200ms ease-in-out 600ms infinite;
 }
+.cbh[data-energy="off"] .cbh__bloom { animation: none; }
 @keyframes cbh-bloom {
   0%, 62%, 100% { opacity: 0;   transform: scale(.75); }
   12%           { opacity: 1;   transform: scale(1); }

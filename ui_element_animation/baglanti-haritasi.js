@@ -125,6 +125,23 @@
   function reduceMotion() {
     return !!(global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches);
   }
+  function wireState(value) {
+    return value === 'active' || value === 'installed' ? value : 'absent';
+  }
+  function strongerWireState(a, b) {
+    var rank = { absent: 0, installed: 1, active: 2 };
+    return rank[wireState(b)] > rank[wireState(a)] ? wireState(b) : wireState(a);
+  }
+  function linkParts(link, tools) {
+    var model = Array.isArray(link) ? link[0] : link && link.model;
+    var tool = Array.isArray(link) ? link[1] : link && link.tool;
+    var explicitState = Array.isArray(link) ? link[2] : link && link.state;
+    return {
+      model: Number(model),
+      tool: Number(tool),
+      state: wireState(explicitState || (tools[tool] && tools[tool].state) || 'active')
+    };
+  }
 
   /* Kablo yolu: yatay çıkış -> S kıvrımı -> yatay giriş.
      Videodaki kablonun merkez hattı piksel piksel çıkarılıp bu formüle
@@ -173,6 +190,7 @@
   CiziBaglantiHaritasi.prototype._build = function () {
     var d = this.data, i;
     this.root.classList.add('cbh');
+    this.root.setAttribute('data-energy', d.energyEnabled === false ? 'off' : 'on');
     if (this.o.perf === 'low') this.root.setAttribute('data-perf', 'low');
     this.root.innerHTML = '';
 
@@ -243,7 +261,7 @@
     this.toolCards = [];
     for (i = 0; i < d.tools.length; i++) {
       var t = d.tools[i];
-      var tc = el('div', 'cbh__card cbh__card--tool');
+      var tc = el('div', 'cbh__card cbh__card--tool is-tool-' + wireState(t.state || 'active'));
       tc.innerHTML =
         '<span class="cbh__ticon">' + (ICONS[t.icon] || ICONS.cli) + '</span>' +
         '<span class="cbh__tname">' + esc(t.name) + '</span>' +
@@ -315,17 +333,32 @@
     this.bloom.style.left = pb.right + 'px';
     this.bloom.style.top  = pb.cy + 'px';
 
-    // kenar listesi: A = provider->model (1:1), B = model->araç (links)
+    // Araç durumu sağdaki model -> araç hattını belirler. Soldaki sağlayıcı ->
+    // model hattı ise yerel uygulama olmasa da enerji taşır; bu durumda orta
+    // parlaklıkta kalır.
     var edges = [];
+    var normalizedLinks = (d.links || []).map(function (link) { return linkParts(link, d.tools || []); });
+    var modelStates = [];
+    for (i = 0; i < n; i++) modelStates.push('absent');
+    normalizedLinks.forEach(function (link) {
+      if (modelStates[link.model] != null) {
+        modelStates[link.model] = strongerWireState(modelStates[link.model], link.state);
+      }
+    });
+    var providerStates = modelStates.map(function (state) {
+      return strongerWireState(state, 'installed');
+    });
     for (i = 0; i < n; i++) {
-      edges.push({ stage: 'A', i: i, a: outs[i], b: { x: mb[i].left, y: mb[i].cy }, target: i });
+      edges.push({
+        stage: 'A', i: i, state: providerStates[i],
+        a: outs[i], b: { x: mb[i].left, y: mb[i].cy }, target: i
+      });
     }
-    var links = d.links || [];
-    for (i = 0; i < links.length; i++) {
-      var mi = links[i][0], ti = links[i][1];
+    for (i = 0; i < normalizedLinks.length; i++) {
+      var link = normalizedLinks[i], mi = link.model, ti = link.tool;
       if (!mb[mi] || !tb[ti]) continue;
       edges.push({
-        stage: 'B', i: i,
+        stage: 'B', i: i, state: link.state,
         a: { x: mb[mi].right, y: mb[mi].cy },
         b: { x: tb[ti].left,  y: tb[ti].cy },
         source: mi, target: ti
@@ -356,6 +389,13 @@
         self._edges[idx] = rec;
       }
       rec.stage = e.stage; rec.source = e.source; rec.target = e.target;
+      rec.state = wireState(e.state);
+      rec.energyActive = d.energyEnabled !== false && (rec.stage === 'A' || rec.state === 'active');
+      [rec.glow, rec.core, rec.pulse].forEach(function (path) {
+        path.classList.remove('is-wire-absent', 'is-wire-installed', 'is-wire-active');
+        path.classList.add('is-wire-' + rec.state);
+      });
+      rec.pulse.classList.toggle('is-energy-active', rec.energyActive);
       rec.glow.setAttribute('d', dStr);
       rec.core.setAttribute('d', dStr);
       rec.pulse.setAttribute('d', dStr);
@@ -370,13 +410,15 @@
 
     if (rebuild) {
       // pinler
-      outs.forEach(function (p) { self._pins.provider.push(self._pin(p)); });
+      outs.forEach(function (p, k) { self._pins.provider.push(self._pin(p, providerStates[k])); });
       mb.forEach(function (b, k) {
-        self._pins.modelIn.push(self._pin({ x: b.left, y: b.cy }));
-        var used = (d.links || []).some(function (l) { return l[0] === k; });
-        self._pins.modelOut.push(used ? self._pin({ x: b.right, y: b.cy }) : null);
+        self._pins.modelIn.push(self._pin({ x: b.left, y: b.cy }, providerStates[k]));
+        var used = normalizedLinks.some(function (l) { return l.model === k; });
+        self._pins.modelOut.push(used ? self._pin({ x: b.right, y: b.cy }, modelStates[k]) : null);
       });
-      tb.forEach(function (b) { self._pins.toolIn.push(self._pin({ x: b.left, y: b.cy })); });
+      tb.forEach(function (b, k) {
+        self._pins.toolIn.push(self._pin({ x: b.left, y: b.cy }, wireState((d.tools[k] || {}).state || 'active')));
+      });
     } else {
       this._pins.provider.forEach(function (c, k) { self._move(c, outs[k]); });
       mb.forEach(function (b, k) {
@@ -390,8 +432,10 @@
     return this;
   };
 
-  CiziBaglantiHaritasi.prototype._pin = function (p) {
+  CiziBaglantiHaritasi.prototype._pin = function (p, state) {
     var c = svgEl('circle', { class: 'cbh__pin', cx: p.x, cy: p.y, r: 2.9 });
+    if (state) c.classList.add('is-wire-' + wireState(state));
+    if (this._settled) c.style.opacity = '1';
     this.gPins.appendChild(c);
     return c;
   };
@@ -489,8 +533,10 @@
   CiziBaglantiHaritasi.prototype._grow = function (e, dur) {
     var self = this, d = dur / this.o.speed;
     e.grown = true;
-    e.core.classList.add('is-hot');
-    e.glow.classList.add('is-hot');
+    if (e.state === 'active') {
+      e.core.classList.add('is-hot');
+      e.glow.classList.add('is-hot');
+    }
     [e.core, e.glow].forEach(function (p) {
       var a = p.animate(
         [{ strokeDashoffset: e.len }, { strokeDashoffset: 0 }],
@@ -520,9 +566,22 @@
   CiziBaglantiHaritasi.prototype._startPulses = function () {
     var self = this, o = this.o;
     this._edges.forEach(function (e, i) {
-      if (e._pulseAnim) { try { e._pulseAnim.cancel(); } catch (err) {} }
+      if (!e.energyActive) {
+        if (e._pulseAnim) {
+          try { e._pulseAnim.cancel(); } catch (_) {}
+          e._pulseAnim = null;
+        }
+        return;
+      }
+      // ResizeObserver ve son yerleşim ölçümü bu metodu tekrar çağırabilir.
+      // Çalışan akışı iptal edip yeniden başlatmak parçayı geriye sıçratıyordu.
+      if (e._pulseAnim) return;
       var dash = o.pulseLength;
       e.pulse.style.strokeDasharray = dash + ' ' + e.len;
+      // Pozitif offset parçayı yolun tamamen soluna, görünmeyen bölgeye koyar.
+      // Gecikme boyunca da bu ilk kare korunur; böylece kablonun ortasında bir
+      // an görünüp geriye kaçmaz, kaynaktan doğal biçimde içeri girer.
+      e.pulse.style.strokeDashoffset = dash;
       var dur = (e.len + dash) / o.pulseSpeed * 1000;
       var a = e.pulse.animate(
         [{ strokeDashoffset: dash }, { strokeDashoffset: -e.len }],
@@ -530,6 +589,7 @@
           duration: dur,
           iterations: Infinity,
           easing: 'linear',
+          fill: 'both',
           // Kayma POZİTİF: her parça kablonun başından doğar.
           //
           // Negatif gecikme animasyonu ortasından başlatıyordu; kablolar
@@ -549,7 +609,6 @@
   CiziBaglantiHaritasi.prototype.settle = function () {
     var self = this;
     this._settled = true;
-    this.root.classList.add('cbh--settled');
     this.providerCard.classList.add('is-in');
     this.ghostM.classList.add('is-out');
     this.ghostT.classList.add('is-out');
@@ -567,9 +626,20 @@
       self._pins[k].forEach(function (c) { if (c) c.style.opacity = '1'; });
     });
 
+    // Pulse geometrisi görünürlük açılmadan hazırlanır. Aynı karede önce bütün
+    // parçaların belirmesi, sonra başlangıca sıçraması böylece mümkün olmaz.
     this._startPulses();
+    this.root.classList.add('cbh--settled');
     this.root.dispatchEvent(new CustomEvent('cbh:settled', { bubbles: true }));
     return this;
+  };
+
+  /** Devam eden giriş koreografisini kesip tek karede son duruma geçer. */
+  CiziBaglantiHaritasi.prototype.finish = function () {
+    if (this._settled) return this;
+    this._clear();
+    this._edges.forEach(function (e) { e._pulseAnim = null; });
+    return this.settle();
   };
 
   /** Her şeyi başlangıç (boş) hâline döndürür. */

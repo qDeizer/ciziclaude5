@@ -37,9 +37,9 @@
   --bad: #ff5560;
 
   /* tank */
-  --tank-liquid-a: #22e4bd;
-  --tank-liquid-b: #058275;
-  --tank-value: #c9ff4d;
+  --tank-liquid-a: #ff9d1c;
+  --tank-liquid-b: #9f3d08;
+  --tank-value: #ffe0ad;
 
   --r-sm: 7px;
   --r-md: 10px;
@@ -230,9 +230,16 @@ button:disabled { opacity: .4; cursor: default; }
    genişlikte akar; kolonlar 1fr ile paneli doldurur. */
 .app-content { flex: 1; position: relative; min-height: 0; overflow: hidden; padding: 12px 14px 14px; }
 .app-screen { width: 100%; }
-/* Harita kendi boyunda kalır, grafik artan yeri doldurur: sabit yükseklikli bir
-   grafik, uzun pencerede altında ölü bir bant bırakıyordu. */
-.dashboard-screen { height: 100%; display: grid; grid-template-rows: auto minmax(120px, 1fr); gap: 10px; }
+/* Harita alanı veri gelmeden önce de ayrılır. Böylece kullanım grafiği ilk
+   karede bütün ekranı kaplayıp harita kurulunca aniden daralmaz. */
+.dashboard-screen {
+  height: 100%;
+  display: grid;
+  grid-template-rows: clamp(290px, 39vh, 310px) minmax(120px, 1fr);
+  gap: 10px;
+  transition: grid-template-rows 240ms var(--ease);
+}
+.connection-panel { min-height: 0; overflow: hidden; }
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg); }
 .panel-head {
@@ -286,6 +293,7 @@ button:disabled { opacity: .4; cursor: default; }
   --cbh-data-col-w: clamp(252px, 29vw, 320px);
   --cbh-radius: var(--r-md);
   padding: 8px 12px 10px;
+  height: 100%;
   background: transparent;
   border-radius: 0;
   font-family: var(--font);
@@ -296,7 +304,9 @@ button:disabled { opacity: .4; cursor: default; }
    dağıtılır; kalan alan kartların içinde ölü boşluk olmak yerine kablo sahnesi
    olur. */
 #connection-map .cbh__stage {
+  height: 100%;
   grid-template-columns: var(--cbh-col-w) var(--cbh-data-col-w) var(--cbh-data-col-w);
+  grid-template-rows: auto minmax(0, 1fr);
   justify-content: space-between;
   column-gap: 0;
   row-gap: 6px;
@@ -311,6 +321,8 @@ button:disabled { opacity: .4; cursor: default; }
 /* Tank kolonu doldurmayı bıraktığı için (max-height) model listesine göre
    ortalanır; yoksa uzun listede tepede asılı kalıyor. */
 #connection-map .cbh__col--provider { justify-content: center; }
+#connection-map .cbh__col--models,
+#connection-map .cbh__col--tools { justify-content: center; }
 
 #connection-map .cbh__card { box-shadow: none; }
 #connection-map .cbh__card--model,
@@ -347,6 +359,13 @@ button:disabled { opacity: .4; cursor: default; }
   transform: translateY(-50%) rotate(45deg);
 }
 #connection-map .cbh__card--tool .cbh__dot { margin-left: auto; }
+#connection-map .cbh__card--tool.is-tool-absent.is-in { opacity: .42; }
+#connection-map .cbh__card--tool.is-tool-absent::after { opacity: .28; }
+#connection-map .cbh__card--tool.is-tool-installed::after { opacity: .62; }
+#connection-map .cbh__card--tool.is-tool-absent:hover {
+  background: var(--cbh-card-2);
+  border-color: var(--line);
+}
 
 /* --- kalan kullanım tankı ------------------------------------------------
    Sıvı kartın içine kırpılır; dalga YALNIZCA yatay ötelenir, döndürülmez —
@@ -384,14 +403,15 @@ button:disabled { opacity: .4; cursor: default; }
 }
 .tank-wave {
   position: absolute;
-  left: 0; bottom: 100%;
+  /* Bir piksel bindirme, kesirli yüksekliklerde SVG ile sıvı gövdesi arasında
+     görünen ince yatay dikişi kapatır. */
+  left: 0; bottom: calc(100% - 1px);
   width: 200%;
   height: 13px;
   color: var(--tank-liquid-a);
   animation: tank-drift 7s linear infinite;
 }
 .tank-wave svg { display: block; width: 100%; height: 100%; }
-.tank-wave--back { height: 17px; opacity: .45; animation-duration: 11s; animation-direction: reverse; }
 @keyframes tank-drift { to { transform: translateX(-50%); } }
 
 /* Logo tankın üst kenarında, markanın üstünde. */

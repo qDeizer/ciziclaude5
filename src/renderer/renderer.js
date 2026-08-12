@@ -60,6 +60,7 @@ let SELECTED_TOOL_ID = null;
 let CONNECTION_MAP = null;
 let QUOTA_VIEW = { percent: 100, unlimited: true, label: "∞" };
 let HAS_ANIMATED_USAGE_TANK = false;
+let HAS_PRESENTED_CONNECTION_MAP = false;
 
 const USAGE_TANK_ENTRY_MS = 1400;
 
@@ -113,6 +114,12 @@ function showAppScreen(screen, selectedToolId = null) {
   const previous = CURRENT_SCREEN;
   CURRENT_SCREEN = screen === "config" ? "config" : "dashboard";
   if (selectedToolId && SWITCH_IDS.includes(selectedToolId)) SELECTED_TOOL_ID = selectedToolId;
+  const returningToDashboard = previous === "config" && CURRENT_SCREEN === "dashboard";
+
+  // Yapılandırma sırasında araç durumu değiştiğinde harita arka planda yeniden
+  // çizilebilir. Panele dönmeden önce doğrudan son hâline sabitle; kullanıcı boş
+  // araç kolonunu, uzayan kabloları veya yeniden dolan kartları görmesin.
+  if (returningToDashboard) CONNECTION_MAP?.finish?.();
   $("dashboard-screen").classList.toggle("hidden", CURRENT_SCREEN !== "dashboard");
   $("config-screen").classList.toggle("hidden", CURRENT_SCREEN !== "config");
   for (const [id, active] of [["screen-dashboard", CURRENT_SCREEN === "dashboard"], ["screen-config", CURRENT_SCREEN === "config"]]) {
@@ -124,7 +131,7 @@ function showAppScreen(screen, selectedToolId = null) {
 
   // Ekranlar yan yana duruyormuş gibi kayarak girer: panel soldan, yapılandırma
   // sağdan. Yön, gidilen ekranın sekme sırasındaki yerinden gelir.
-  if (previous !== CURRENT_SCREEN) {
+  if (previous !== CURRENT_SCREEN && !returningToDashboard) {
     const entering = $(CURRENT_SCREEN === "config" ? "config-screen" : "dashboard-screen");
     const direction = CURRENT_SCREEN === "config" ? "enter-right" : "enter-left";
     entering.classList.remove("enter-right", "enter-left");
@@ -458,6 +465,26 @@ function localToolInstalled(toolId) {
   return false;
 }
 
+function dashboardProductInstalled(toolKey) {
+  if (toolKey === CLAUDE_CODE) {
+    return CLAUDE_STATE.cli?.installed === true || (CLAUDE_STATE.cli?.editorExtensions || []).length > 0;
+  }
+  if (toolKey === CLAUDE_DESKTOP) return CLAUDE_STATE.desktop?.installed === true;
+  if (toolKey === CODEX_CLI_PRODUCT) {
+    return CODEX_STATE.cli?.installed === true || (CODEX_STATE.cli?.editorExtensions || []).length > 0;
+  }
+  if (toolKey === CODEX_DESKTOP_PRODUCT) return CODEX_STATE.desktop?.installed === true;
+  return false;
+}
+
+function dashboardConnectionState(tool, status) {
+  if (!dashboardProductInstalled(tool.key)) return "absent";
+  const configured = status?.blocked !== true
+    && status?.applied === true
+    && status?.desiredEnabled !== false;
+  return configured ? "active" : "installed";
+}
+
 function dashboardToolNodes(offeredIds) {
   const nodes = [];
   if (offeredIds.includes(CLAUDE_CODE)) {
@@ -483,13 +510,10 @@ const WAVE_SVG = '<svg viewBox="0 0 240 20" preserveAspectRatio="none" aria-hidd
 function tankElements() {
   const liquid = document.createElement("span");
   liquid.className = "tank-liquid";
-  const back = document.createElement("span");
-  back.className = "tank-wave tank-wave--back";
-  back.innerHTML = WAVE_SVG;
-  const front = document.createElement("span");
-  front.className = "tank-wave";
-  front.innerHTML = WAVE_SVG;
-  liquid.append(back, front);
+  const wave = document.createElement("span");
+  wave.className = "tank-wave";
+  wave.innerHTML = WAVE_SVG;
+  liquid.append(wave);
 
   // Logo tankın üst kenarına oturur; üst bardaki kopyası kaldırıldı, marka tek
   // yerde durur.
@@ -551,7 +575,11 @@ function renderConnectionMap() {
     ? TEMPLATES.combos
     : Array.isArray(ME?.combos) ? ME.combos : [];
   const offered = accessibleToolIds(models);
-  const tools = dashboardToolNodes(offered);
+  const byStatus = new Map(LAST_TOOL_STATUSES.map((status) => [status.id, status]));
+  const tools = dashboardToolNodes(offered).map((tool) => ({
+    ...tool,
+    state: dashboardConnectionState(tool, byStatus.get(tool.switchId)),
+  }));
   const toolIndex = new Map(tools.map((tool, index) => [tool.key, index]));
   // Sunucu her modele erişim sözleşmesini (`desktopClients`) iliştirmiyor.
   // Hesapta yedi model varken üçünde bu alan dolu geliyor; kalanlar hiçbir
@@ -568,9 +596,10 @@ function renderConnectionMap() {
     }
   });
 
+  const animateEntry = !HAS_PRESENTED_CONNECTION_MAP && CURRENT_SCREEN === "dashboard";
   CONNECTION_MAP = CONNECTION_MAP?.destroy?.() || null;
-  CONNECTION_MAP = new window.CiziBaglantiHaritasi(root, {
-    autoplay: true,
+  const connectionMap = new window.CiziBaglantiHaritasi(root, {
+    autoplay: animateEntry,
     speed: 1.55,
     // Enerji akışı üç kat yavaş: hız kabloyu bir ışık şeridine çeviriyordu.
     pulseSpeed: 63,
@@ -583,14 +612,27 @@ function renderConnectionMap() {
     bendRatio: 0.5,
     data: {
       provider: { name: "Cizi Code", status: "", icon: "cloud" },
+      energyEnabled: !ME?.isLimitReached && (QUOTA_VIEW.unlimited || QUOTA_VIEW.percent > 0),
       models: models.map((model, index) => ({
         name: displayModelName(modelName(model)),
         meta: clientsPerModel[index].length ? "Erişilebilir" : "Araç yok",
       })),
-      tools: tools.map((tool) => ({ name: tool.name, icon: tool.icon })),
-      links,
+      tools: tools.map((tool) => ({ name: tool.name, icon: tool.icon, state: tool.state })),
+      links: links.map(([model, tool]) => ({ model, tool, state: tools[tool]?.state || "absent" })),
     },
   });
+  CONNECTION_MAP = connectionMap;
+  if (animateEntry) {
+    HAS_PRESENTED_CONNECTION_MAP = true;
+  } else {
+    // Yenileme ve yapılandırma dönüşlerinde giriş koreografisini tekrarlama.
+    // Bileşenin ilk ölçümü tamamlandıktan sonra tek karede yerleşmiş hâle geçer.
+    requestAnimationFrame(() => {
+      if (CONNECTION_MAP !== connectionMap) return;
+      connectionMap.layout();
+      connectionMap.finish();
+    });
+  }
 
   const titles = root.querySelectorAll(".cbh__coltitle");
   if (titles[0]) titles[0].textContent = "Kalan kullanım";
@@ -602,7 +644,7 @@ function renderConnectionMap() {
     provider.append(...tankElements());
     const providerEntryDelay = Number(CONNECTION_MAP.t?.providerIn || 0)
       / Math.max(0.1, Number(CONNECTION_MAP.o?.speed || 1));
-    updateUsageTank({ animateFromEmpty: true, animationDelayMs: providerEntryDelay });
+    updateUsageTank({ animateFromEmpty: animateEntry, animationDelayMs: providerEntryDelay });
   }
 
   CONNECTION_MAP.modelCards.forEach((modelCard, index) => {
@@ -622,7 +664,6 @@ function renderConnectionMap() {
   requestAnimationFrame(() => requestAnimationFrame(relayout));
   document.fonts?.ready?.then(relayout);
 
-  const byStatus = new Map(LAST_TOOL_STATUSES.map((status) => [status.id, status]));
   CONNECTION_MAP.toolCards.forEach((toolCard, index) => {
     const tool = tools[index];
     if (!tool) return;
@@ -630,10 +671,14 @@ function renderConnectionMap() {
     toolCard.role = "button";
     toolCard.dataset.cliId = `screen.config.${tool.key}`;
     toolCard.dataset.cliLabel = `${tool.name} yapılandırmasını aç`;
-    toolCard.title = `${tool.name} yapılandırma ekranını aç`;
-    const status = byStatus.get(tool.switchId);
+    toolCard.classList.add(`is-tool-${tool.state}`);
+    const stateLabel = tool.state === "active"
+      ? "Kurulu ve yapılandırılmış"
+      : tool.state === "installed" ? "Kurulu, yapılandırılmamış" : "Kurulu değil";
+    toolCard.title = `${stateLabel} · ${tool.name} yapılandırma ekranını aç`;
+    toolCard.setAttribute("aria-label", `${tool.name}: ${stateLabel}. Yapılandırmayı aç`);
     const dot = toolCard.querySelector(".cbh__dot");
-    if (dot && (!localToolInstalled(tool.switchId) || status?.blocked)) dot.classList.add("cbh__dot--muted");
+    if (dot && tool.state !== "active") dot.classList.add("cbh__dot--muted");
     const open = () => showAppScreen("config", tool.switchId);
     toolCard.addEventListener("click", open);
     toolCard.addEventListener("keydown", (event) => {
