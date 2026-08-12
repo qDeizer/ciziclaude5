@@ -162,6 +162,17 @@ Koordinatör katmanı iki ürünü tek anahtar altında birleştirir:
   servis ikilisi hiçbir zaman hedef değildir. Servis kaydı okunamazsa eski katı
   davranışa düşülür. Gerçekten çalışan bir Claude Desktop hâlâ engeldir ve hata
   mesajı artık hangi sürecin engellediğini yazar.
+- **Çıkmış bir süreç, kapatma işlemi için başarısızlık değildir.** Anahtar
+  "Claude Desktop açık, kapatayım mı?" diye sorup onay aldığında dokuz süreci
+  birden kapatıyor. Her PID'e dokunmadan hemen önce kimliği (PID + yol +
+  başlangıç zamanı) yeniden doğrulanır — bu kural duruyor: kimliği doğrulanmamış
+  hiçbir PID'e dokunulmaz. Ama ana pencere kapanınca yardımcı süreçler saniyeler
+  içinde çıkıyor ve boşalan PID'leri Windows başka süreçlere veriyor; eskiden bu
+  durum `PROCESS_SCAN_FAILED` ile işlemi düşürüyor, Claude gerçekten kapandığı
+  hâlde anahtar "kapatılamadı" deyip yaptığı işi geri alıyordu. Artık çıkmış ya
+  da PID'i devredilmiş süreç atlanır; "gerçekten kapandı mı" sorusunu kapatma
+  betiği değil, sonrasındaki taze tarama cevaplar. Kapatmanın kendi hatası da
+  artık tarama hatası gibi değil, `PROCESS_CLOSE_FAILED` olarak bildirilir.
 - **Marka terimi `Cizi Code`.** Claude arayüzündeki "Gateway" geçişleri — sol
   alttaki sağlayıcı etiketi dahil, bütün dil kataloglarında — `Cizi Code` olarak
   yazılır. URL, yol ve yapılandırma anahtarı gibi işlevsel değerler

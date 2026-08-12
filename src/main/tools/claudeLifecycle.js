@@ -368,6 +368,17 @@ function processScanError(cause) {
   return error;
 }
 
+// Kapatma denemesinin kendisi basarisiz oldu. Bunu tarama hatasi gibi
+// bildirmek kullaniciya "surecler denetlenemedi" dedirtiyordu; oysa tarama
+// calisiyor, kapatma calismiyordu. Yanlis teshis, dogru teshisten daha
+// pahaliya mal olur.
+function processCloseError(cause) {
+  const error = new Error("Claude Desktop could not be closed.");
+  error.code = "PROCESS_CLOSE_FAILED";
+  if (cause) error.cause = cause;
+  return error;
+}
+
 function expectedProcessIdentities(processes) {
   const identities = [];
   const seen = new Set();
@@ -424,23 +435,42 @@ function stopPowerShellScript() {
     "}",
     "return $true",
     "}",
-    // Revalidate every identity before attempting a close. If WMI cannot
-    // confirm it, fail closed rather than targeting a potentially reused PID.
+    // Her PID, ona dokunulmadan HEMEN once yeniden dogrulanir. Uc olasilik var
+    // ve ucu de farkli seyler demek:
+    //
+    //   gozlenemiyor        -> surec cikmis. Isimiz zaten bitti.
+    //   kimlik uyusmuyor    -> Windows o PID'i BASKA bir surece vermis; bizim
+    //                          surecimiz cikmis demektir. O PID'e dokunulmaz.
+    //   kimlik uyusuyor     -> hedef hala ayakta; kapatilir.
+    //
+    // Ilk iki durum eskiden islemi hataya dusuruyordu. Claude Desktop dokuz
+    // surecle calisiyor ve ana pencere kapaninca hepsi birden cikiyor; bes
+    // saniyelik beklemede bosalan PID'lerin yeniden kullanilmasi olagan.
+    // Sonuc: Claude gercekten kapandigi halde anahtar "kapatilamadi" diyor,
+    // yapilan is geri aliniyordu. Bir surecin cikmis olmasi, onu kapatmak
+    // isteyen bir islem icin basarisizlik degildir.
+    //
+    // Guvenlik kurali aynen duruyor: kimligi dogrulanmamis hicbir PID'e
+    // dokunulmaz. "Gercekten kapandi mi" sorusunu ise bu betik degil, cagiran
+    // taraftaki taze tarama cevaplar.
+    "$stopped=0;$vanished=0;$reused=0",
     "foreach($item in $expected){",
     "$observed=Get-ObservedProcess ([int]$item.pid)",
-    "if($null -ne $observed -and -not (Test-SameProcess $item $observed)){throw 'Claude process identity changed before close.'}",
-    "}",
-    "foreach($item in $expected){",
-    "$observed=Get-ObservedProcess ([int]$item.pid)",
-    "if($null -ne $observed -and (Test-SameProcess $item $observed)){$p=Get-Process -Id ([int]$item.pid) -ErrorAction Stop;if($p.MainWindowHandle -ne 0){$null=$p.CloseMainWindow()}}",
+    "if($null -eq $observed){$vanished++;continue}",
+    "if(-not (Test-SameProcess $item $observed)){$reused++;continue}",
+    "$p=Get-Process -Id ([int]$item.pid) -ErrorAction SilentlyContinue",
+    "if($null -ne $p -and $p.MainWindowHandle -ne 0){$null=$p.CloseMainWindow()}",
     "}",
     "Start-Sleep -Seconds 5",
     "foreach($item in $expected){",
     "$observed=Get-ObservedProcess ([int]$item.pid)",
-    "if($null -eq $observed){continue}",
-    "if(-not (Test-SameProcess $item $observed)){throw 'Claude process identity changed before force-close.'}",
-    "Stop-Process -Id ([int]$item.pid) -Force -ErrorAction Stop",
+    "if($null -eq $observed){$vanished++;continue}",
+    "if(-not (Test-SameProcess $item $observed)){$reused++;continue}",
+    // Gozlem ile Stop-Process arasinda da surec cikabilir. Hata yutulmaz:
+    // hemen yeniden bakilir ve surec hala ORADA ise hata gercektir.
+    "try{Stop-Process -Id ([int]$item.pid) -Force -ErrorAction Stop;$stopped++}catch{$still=Get-ObservedProcess ([int]$item.pid);if($null -ne $still -and (Test-SameProcess $item $still)){throw}else{$vanished++}}",
     "}",
+    "[pscustomobject]@{stopped=$stopped;vanished=$vanished;reused=$reused}|ConvertTo-Json -Compress",
   ].join(";");
 }
 
@@ -469,7 +499,7 @@ async function stopTool(toolId, {
         env: { CIZI_EXPECTED_PROCESSES: JSON.stringify(payload) },
       });
     } catch (error) {
-      throw processScanError(error);
+      throw processCloseError(error);
     }
     stoppedCount += payload.processes.length;
     // A process that has just exited can remain in WMI briefly while its

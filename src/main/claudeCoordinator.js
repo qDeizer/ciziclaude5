@@ -31,6 +31,9 @@ const DESKTOP_MESSAGES = {
   USER_POLICY_BLOCK: "Claude Desktop'ta zaten bir kullanıcı politikası var. Cizi Code onu değiştirmedi.",
   REPAIR_REQUIRED: "Claude Desktop'ın önceki ayarlarının yedeği bulunamadı; önce onarım gerekiyor.",
   PROCESS_SCAN_FAILED: "Claude Desktop süreçleri güvenli şekilde denetlenemedi. Tekrar deneyin.",
+  PROCESS_CLOSE_FAILED: "Claude Desktop kapatılamadı. Uygulamayı elle kapatıp tekrar deneyin.",
+  PROCESS_STILL_RUNNING: "Claude Desktop kapanmadı. Uygulamayı elle kapatıp tekrar deneyin.",
+  PROCESS_IDENTITY_UNVERIFIED: "Claude Desktop süreçleri güvenle tanımlanamadı; hiçbir süreç kapatılmadı. Tekrar deneyin.",
   CLAUDE_DESKTOP_DETECTION_FAILED: "Cizi Code Claude Desktop'ı doğrulayamadı. Tekrar deneyin.",
   CLAUDE_DESKTOP_MODEL_REQUIRED: "Claude Desktop için uygun bir hesap modeli bulunamadı.",
   TOOL_OPERATION_IN_PROGRESS: "Claude Desktop üzerinde başka bir işlem sürüyor. Bitmesini bekleyin.",
@@ -278,10 +281,20 @@ function createClaudeCoordinator({
     }
   }
 
+  // Anahtarin "kapatayim mi?" sorusuna evet denince calisan adim. Hatasi
+  // BURADA karsilaniyor: eskiden apply/revert'in try blogunun disinda kaldigi
+  // icin kullaniciya Turkce karsiligi olan kod yerine ham, cevrilmemis bir
+  // mesaj gidiyordu.
   async function stopDesktop() {
-    const result = await lifecycle.stopTool("claude-desktop");
-    log?.info("claude", "Claude Desktop kapatıldı", { stopped: result?.stopped ?? null });
-    return result;
+    try {
+      const result = await lifecycle.stopTool("claude-desktop");
+      log?.info("claude", "Claude Desktop kapatıldı", { stopped: result?.stopped ?? null });
+      return result;
+    } catch (error) {
+      log?.error("claude", `Claude Desktop kapatılamadı: ${error?.code || ""} ${error?.message || error}`);
+      report("", "");
+      throw Object.assign(error, { userMessage: desktopMessage(error) });
+    }
   }
 
   // The part of a removal that is not a file: registry keys, autostart entries
