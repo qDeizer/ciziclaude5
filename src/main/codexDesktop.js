@@ -14,7 +14,7 @@ const { promisify } = require("util");
 const paths = require("./codexPaths");
 
 const execFileAsync = promisify(execFile);
-const INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
+const INSTALL_INACTIVITY_TIMEOUT_MS = 20 * 60 * 1000;
 const PACKAGE_REGISTRATION_POLL_MS = 3000;
 const PS_ARGS = ["-NoProfile", "-NonInteractive", "-Command"];
 
@@ -191,7 +191,7 @@ function runWinget(storeId, startedAt, {
   onPackageRegistered,
   onProgress = () => {},
   spawnProcess = spawn,
-  timeoutMs = INSTALL_TIMEOUT_MS,
+  timeoutMs = INSTALL_INACTIVITY_TIMEOUT_MS,
   registrationPollMs = PACKAGE_REGISTRATION_POLL_MS,
 } = {}) {
   return new Promise((resolve, reject) => {
@@ -217,10 +217,12 @@ function runWinget(storeId, startedAt, {
     let settled = false;
     let probingRegistration = false;
     let registrationWatcher = null;
+    let lastProgressAt = startedAt;
+    const measuredProgress = new Map();
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearInterval(timeoutWatcher);
       clearInterval(heartbeat);
       clearInterval(registrationWatcher);
       if (error) reject(error);
@@ -253,10 +255,12 @@ function runWinget(storeId, startedAt, {
       }
     };
 
-    const timer = setTimeout(() => {
+    const timeoutWatcher = setInterval(() => {
+      if (Date.now() - lastProgressAt < timeoutMs) return;
       try { execFile("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => {}); } catch { /* best effort */ }
-      finish(new Error("Microsoft Store kurulumu zaman aşımına uğradı."));
-    }, timeoutMs);
+      finish(new Error("Microsoft Store kurulumu 20 dakika ölçülebilir ilerleme olmadığı için zaman aşımına uğradı."));
+    }, Math.min(1000, Math.max(50, Math.floor(timeoutMs / 4))));
+    timeoutWatcher.unref?.();
 
     // Store installs can stay silent for long stretches; the elapsed clock is
     // what tells the user the process is still alive.
@@ -275,6 +279,15 @@ function runWinget(storeId, startedAt, {
         const progress = parseProgress(part);
         const named = parsePhase(part);
         if (named) phase = named;
+        if (progress) {
+          const id = phase === "download" ? "download" : "install";
+          const metric = Number.isFinite(progress.received) ? progress.received : progress.percent;
+          const key = `${id}:${Number.isFinite(progress.received) ? "bytes" : "percent"}`;
+          if (Number.isFinite(metric) && metric > (measuredProgress.get(key) ?? -1)) {
+            measuredProgress.set(key, metric);
+            lastProgressAt = Date.now();
+          }
+        }
         lastDetail = progress?.total
           ? `${detail} (${formatBytes(progress.received)} / ${formatBytes(progress.total)})`
           : detail;

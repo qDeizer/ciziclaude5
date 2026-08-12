@@ -24,7 +24,7 @@ const claudeLifecycle = require("./tools/claudeLifecycle");
 const reconcileBackgroundTask = require("./tools/claudeReconcileTask");
 const toolIntentStore = require("./tools/toolIntentStore");
 const { configurationForTool } = require("./tools/toolModelConfiguration");
-const { CLAUDE_DESKTOP_ID, createIntegrationService } = require("./tools/integrationService");
+const { createIntegrationService } = require("./tools/integrationService");
 const { createClaudeCoordinator } = require("./claudeCoordinator");
 const log = require("./logger");
 const { CliBridge } = require("./cliBridge");
@@ -102,9 +102,9 @@ const integrations = createIntegrationService({
   toolManager: toolMgr,
   claude,
   intentStore: toolIntentStore,
-  // Both Claude products are configured from the Claude model family, whichever
-  // switch asked; every other tool answers to its own id.
-  resolveValues: (toolId) => accountToolValues(toolId === CLAUDE_DESKTOP_ID ? "claude-code" : toolId, recordedModel(toolId)),
+  // Each switch asks for its own server-declared model access. Claude Desktop
+  // and Claude Code share a capability contract, but never an access grant.
+  resolveValues: (toolId) => accountToolValues(toolId, recordedModel(toolId)),
   getSession: () => session,
   baseUrl: api.TOOL_BASE_URL,
   log,

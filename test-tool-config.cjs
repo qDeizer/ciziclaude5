@@ -21,12 +21,16 @@ const { configurationForTool } = require("./src/main/tools/toolModelConfiguratio
 const { getTool } = require("./src/main/tools/registry");
 const contract = require("./src/main/tools/claudeDesktopContract");
 const capabilities = require("./src/renderer/modelCapabilities");
+const toolAccess = require("./src/renderer/toolAccess");
 
 const BASE = "https://lotpik.cizicode.me";
 const KEY = "sk-test-key";
 const CLAUDE_MODELS = ["opus-4.8", "sonnet-4.6", "haiku-4.5", "fable-5"];
 const CODEX_MODELS = ["gpt-5.6-luna", "gpt-5.6-terra", "Sol 5.6"];
-const COMBOS = [...CLAUDE_MODELS, ...CODEX_MODELS];
+const profile = (name, desktopClients, extra = {}) => ({ name, desktopClients, ...extra });
+const claudeProfiles = (names) => names.map((name) => profile(name, ["claude-code", "claude-desktop"]));
+const codexProfiles = (names) => names.map((name) => profile(name, ["codex"]));
+const COMBOS = [...claudeProfiles(CLAUDE_MODELS), ...codexProfiles(CODEX_MODELS)];
 // The gateway publishes each 1M variant as its own id, so this list is the only
 // truthful source for supports1m. Here fable-5 deliberately has no variant.
 const GATEWAY_MODELS = [
@@ -55,6 +59,25 @@ async function checkAsync(name, fn) {
 }
 
 // ---------------------------------------------------------------- capabilities
+check("tool access follows desktopClients, never the model name", () => {
+  const profiles = [
+    profile("completely-new-model", ["claude-desktop"]),
+    profile("opus-looking-but-codex-only", ["codex"]),
+    profile("gpt-looking-without-access", []),
+  ];
+  assert.deepStrictEqual(toolAccess.accessibleToolIds(profiles), ["claude-desktop", "codex"]);
+  assert.deepStrictEqual(toolAccess.modelsForTool(profiles, "claude-desktop").map(toolAccess.modelName), ["completely-new-model"]);
+  assert.deepStrictEqual(toolAccess.modelsForTool(profiles, "codex").map(toolAccess.modelName), ["opus-looking-but-codex-only"]);
+  assert.deepStrictEqual(toolAccess.modelsForTool(profiles, "claude-code"), []);
+});
+
+check("a client cannot configure a familiar model without a server grant", () => {
+  assert.throws(
+    () => configurationForTool("claude-code", [profile("opus-99", ["codex"])]),
+    (error) => error?.code === "NO_COMPATIBLE_MODELS",
+  );
+});
+
 check("Claude Code effort levels are its own enum, not Codex's", () => {
   assert.deepStrictEqual([...capabilities.CLAUDE_REASONING_LEVELS], ["low", "medium", "high", "xhigh", "max"]);
   assert.ok(!capabilities.isReasoningLevel("ultra", "claude-code"));
@@ -115,15 +138,15 @@ check("the effort picker is forced on for gateway model ids", () => {
 });
 
 check("the newest model of a tier wins the default", () => {
-  const picked = configurationForTool("claude-code", ["opus-4.8", "opus-5", "opus-4.10", "sonnet-4.6"]);
+  const picked = configurationForTool("claude-code", claudeProfiles(["opus-4.8", "opus-5", "opus-4.10", "sonnet-4.6"]));
   assert.strictEqual(picked.model, "opus-5");
   assert.strictEqual(picked.opus, "opus-5");
-  const dotted = configurationForTool("claude-code", ["opus-4.8", "opus-4.10"]);
+  const dotted = configurationForTool("claude-code", claudeProfiles(["opus-4.8", "opus-4.10"]));
   assert.strictEqual(dotted.model, "opus-4.10", "4.10 is newer than 4.8");
 });
 
 check("Claude Desktop effort ids are only used when the gateway serves them", () => {
-  const withAlias = configurationForTool("claude-code", ["Opus-5"], {
+  const withAlias = configurationForTool("claude-code", claudeProfiles(["Opus-5"]), {
     gatewayModels: ["Opus-5", "claude-opus-5"],
   });
   assert.strictEqual(withAlias.modelProfiles[0].desktopEffortName, "claude-opus-5");
@@ -132,7 +155,7 @@ check("Claude Desktop effort ids are only used when the gateway serves them", ()
   assert.strictEqual(entry.labelOverride, "Opus-5");
   assert.strictEqual(entry.showsEffortPicker, true);
 
-  const without = configurationForTool("claude-code", ["Opus-5"], { gatewayModels: ["Opus-5"] });
+  const without = configurationForTool("claude-code", claudeProfiles(["Opus-5"]), { gatewayModels: ["Opus-5"] });
   assert.strictEqual(without.modelProfiles[0].desktopEffortName, null);
   const plain = contract.desktopModels({ ...without })[0];
   assert.strictEqual(plain.name, "Opus-5", "an id the gateway does not serve is never invented");
@@ -171,8 +194,9 @@ check("turning it off removes every value Cizi added", () => {
 // Claude Desktop is configured through exactly one surface: its own
 // configuration library. The registry-policy variant was never shipped as a
 // default and has been removed, so there is one config shape left to assert.
-const desktopModels = contract.desktopModels(claudeValues);
-const libraryConfig = contract.buildConfigLibraryConfig(claudeValues, desktopModels, "C:\\helper.exe");
+const claudeDesktopValues = { base: BASE, apiKey: KEY, ...configurationForTool("claude-desktop", COMBOS, { gatewayModels: GATEWAY_MODELS }) };
+const desktopModels = contract.desktopModels(claudeDesktopValues);
+const libraryConfig = contract.buildConfigLibraryConfig(claudeDesktopValues, desktopModels, "C:\\helper.exe");
 const inferenceModels = libraryConfig.inferenceModels;
 
 check("no config key Claude Desktop does not have is written", () => {

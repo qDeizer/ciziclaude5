@@ -7,7 +7,7 @@ const { downloadForManualInstall } = require("./manualInstall");
 const { usableEditorExtensions, editorUserSettings } = require("./editorExtensions");
 
 const execFileAsync = promisify(execFile);
-const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const INSTALL_INACTIVITY_TIMEOUT_MS = 20 * 60 * 1000;
 const OFFICIAL_SITE_URL = "https://developers.openai.com/codex/cli/";
 const WINDOWS_INSTALLER_URL = "https://chatgpt.com/codex/install.ps1";
 const GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/openai/codex/releases/latest";
@@ -303,13 +303,28 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
     fs.writeFileSync(target, Buffer.concat(chunks));
     return received;
   };
-  const waitFor = (child) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { try { execFile("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => {}); } catch {} reject(new Error("The official Codex CLI installer timed out.")); }, INSTALL_TIMEOUT_MS);
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
-    child.once("exit", (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`Codex CLI installer exited with code ${code}.`)); });
+  const waitFor = (child, getLastProgressAt) => new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setInterval(() => {
+      if (Date.now() - getLastProgressAt() < INSTALL_INACTIVITY_TIMEOUT_MS) return;
+      try { execFile("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }, () => {}); } catch {}
+      finish(new Error("The official Codex CLI installer timed out after 20 minutes without download progress."));
+    }, 15000);
+    timer.unref?.();
+    child.once("error", finish);
+    child.once("exit", (code) => finish(code === 0 ? null : new Error(`Codex CLI installer exited with code ${code}.`)));
   });
-  const monitorInstaller = (startedAt) => {
+  const monitorInstaller = (startedAt, onByteProgress) => {
     let lastDetail = "";
+    let lastArchiveBytes = -1;
+    let binarySeen = false;
     let packageTotalBytes = null;
     let packageSizeLookupStarted = false;
     const loadPackageTotal = (assetName) => {
@@ -334,6 +349,10 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
       try {
         const currentBinary = path.join(paths.standaloneDir, "current", "bin", "codex.exe");
         if (fs.existsSync(currentBinary)) {
+          if (!binarySeen) {
+            binarySeen = true;
+            onByteProgress();
+          }
           detail = `Codex files are in place; verifying the command and finalizing (${elapsed}s elapsed).`;
           percent = 100;
         } else {
@@ -350,6 +369,10 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
               .map((file) => ({ file, stat: fs.statSync(file) }))
               .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)[0];
             if (archive) {
+              if (archive.stat.size > lastArchiveBytes) {
+                lastArchiveBytes = archive.stat.size;
+                onByteProgress();
+              }
               loadPackageTotal(path.basename(archive.file));
               const packagePercent = packageTotalBytes
                 ? Math.min(100, Math.round((archive.stat.size / packageTotalBytes) * 100))
@@ -396,6 +419,7 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
         operation("install", { label: "Run official installer", status: "running", percent: null, detail: "The official installer is running..." });
         emit({ status: "installing", phase: "install", percent: null, message: "Running the official Codex installer..." });
         const startedAt = Date.now();
+        let lastByteProgressAt = startedAt;
         // The official installer supports this flag.  On this machine its
         // releases.openai.com asset repeatedly reached the 300-second timeout,
         // while the official GitHub Releases fallback is immediately reachable.
@@ -411,9 +435,9 @@ function createCodexCliService({ userDataPath, log, onInstallState, detect = det
           operation("install", { detail: lastInstallerOutput || "The official installer is running..." });
         };
         child.stdout?.on("data", onOutput); child.stderr?.on("data", onOutput);
-        const stopMonitor = monitorInstaller(startedAt);
+        const stopMonitor = monitorInstaller(startedAt, () => { lastByteProgressAt = Date.now(); });
         try {
-          await waitFor(child);
+          await waitFor(child, () => lastByteProgressAt);
         } catch (error) {
           error.installerDetail = lastInstallerOutput;
           throw error;

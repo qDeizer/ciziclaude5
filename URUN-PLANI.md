@@ -24,7 +24,7 @@ doğrulama (syntax, modül yükleme, birim testi, kuru-çalışma) ile kanıtlan
 | 8 | Güncelleme dil dosyalarını sıfırlarsa hemen yama | var | **var** | SYSTEM görevi: olay + boot + logon + periyodik |
 | 9 | Switch/gerçeklik uyuşmazlığının onarımı | var | **var** | niyet kaydı + reconcile; kullanıcı isteği hep tam denetim yapar |
 | 10 | Bilgisayarı yormamak | kısmi | **bitti** | oturmuş anahtar atlanıyor (`skipped:1`); menü 2181 ms → 70 ms |
-| 11 | Sunucu modellerine göre satır aktifliği | var | **var** | `modelFamilies` + `toolIsUnlocked` |
+| 11 | Sunucu profilindeki araç erişimine göre satır aktifliği | var | **var** | `toolAccess` + `desktopClients` |
 | 12 | "Opus-5" değil "Opus 5" | yok | **bitti** | `displayModelName`; yapılandırmaya yazılan ad değişmiyor |
 | 13 | UI baştan + %'li geri bildirim | kısmi | **bitti** | kart tabanlı yerleşim, kart içi ilerleme, tek ilerleme kanalı |
 | 14 | Claude test edilmeyecek | kural | **uygulandı** | iki Claude anahtarı da hiç açılmadı; yalnız Codex çalıştırıldı |
@@ -42,7 +42,7 @@ Dört ürünü tek yerde adlandırır: `id`, `name`, `switchId`, `family`, `kind
 (`canDownloadOnly`, `installsFromStore`, `officialSiteUrl`).
 
 Neden: bugün "hangi ürünler var" sorusunun cevabı renderer'da sabitler,
-main.js'te IPC adları, `modelFamilies`'te aile anahtarları olarak **üç kez**
+main.js'te IPC adları, `toolAccess` içinde sunucunun araç kimlikleri olarak **üç kez**
 yazılı. Yeni bir ürün eklemek üç dosyaya dokunmak demek. Katalog bunu bire indirir.
 
 ### 2.2 `src/main/productRemoval.js` — kategori bazlı kaldırma

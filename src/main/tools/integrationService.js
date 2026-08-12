@@ -98,6 +98,10 @@ function createIntegrationService({
     }
   }
 
+  function progressFor(options) {
+    return options?.reportProgress === false ? () => {} : progress;
+  }
+
   // ---------------------------------------------------------------- adapters
   // Every switch looks the same from here: report status, apply, revert, verify.
   // Claude Desktop keeps its own transaction engine and the registry tools are a
@@ -212,40 +216,43 @@ function createIntegrationService({
   async function enableUnlocked(toolId, options) {
     const adapter = adapterFor(toolId);
     const intentId = adapter.id;
-    const previousIntent = intentStore.get(intentId);
-    progress(intentId, "precheck", ENABLE_STEPS);
-    const status = await adapter.status();
-    if (!status.installed) {
-      throw codedError("TOOL_NOT_INSTALLED", `${adapter.name} bu bilgisayarda kurulu değil.`);
-    }
-    if (status.blocked) {
-      throw codedError("TOOL_BLOCKED", status.blockReason || `${adapter.name} şu an ayarlanamıyor.`);
-    }
-    // Asked before anything is recorded, so a declined prompt leaves the switch
-    // exactly as the user left it.
-    if (status.requiresClose && options.closeRunning !== true) {
-      throw codedError(
-        CONFIRMATION_REQUIRED,
-        "Claude Desktop şu an açık. Ayarların uygulanabilmesi için kapatılması gerekiyor.",
-      );
-    }
-
-    progress(intentId, "models", ENABLE_STEPS);
-    const values = await resolveValues(toolId);
-    if (!values?.model) {
-      throw codedError("MODEL_REQUIRED", `${adapter.name} için uygun bir hesap modeli bulunamadı.`);
-    }
-
-    // Intent first: an interrupted apply is finished by the reconcile, not undone.
-    intentStore.set(intentId, true, values);
+    const report = progressFor(options);
+    let values = null;
+    let intentCommitted = false;
+    report(intentId, "precheck", ENABLE_STEPS);
     try {
+      const status = await adapter.status();
+      if (!status.installed) {
+        throw codedError("TOOL_NOT_INSTALLED", `${adapter.name} bu bilgisayarda kurulu değil.`);
+      }
+      if (status.blocked) {
+        throw codedError("TOOL_BLOCKED", status.blockReason || `${adapter.name} şu an ayarlanamıyor.`);
+      }
+      // Asked before anything is recorded, so a declined prompt leaves the switch
+      // exactly as the user left it.
+      if (status.requiresClose && options.closeRunning !== true) {
+        throw codedError(
+          CONFIRMATION_REQUIRED,
+          "Claude Desktop şu an açık. Ayarların uygulanabilmesi için kapatılması gerekiyor.",
+        );
+      }
+
+      report(intentId, "models", ENABLE_STEPS);
+      values = await resolveValues(toolId);
+      if (!values?.model) {
+        throw codedError("MODEL_REQUIRED", `${adapter.name} için uygun bir hesap modeli bulunamadı.`);
+      }
+
+      // Intent first: an interrupted apply is finished by the reconcile, not undone.
+      intentStore.set(intentId, true, values);
+      intentCommitted = true;
       // The backup is taken inside `apply`; it is reported separately because it
       // is the step that protects the user's own settings, and a user watching a
       // switch has a right to see it happen.
-      progress(intentId, "backup", ENABLE_STEPS);
-      progress(intentId, "apply", ENABLE_STEPS);
+      report(intentId, "backup", ENABLE_STEPS);
+      report(intentId, "apply", ENABLE_STEPS);
       const result = await adapter.apply(values, options);
-      progress(intentId, "verify", ENABLE_STEPS);
+      report(intentId, "verify", ENABLE_STEPS);
       if (!await adapter.verify(values)) {
         throw codedError("TOOL_APPLY_VERIFY_FAILED", `${adapter.name} ayarları doğrulanamadı.`);
       }
@@ -255,7 +262,7 @@ function createIntegrationService({
         defaultModel: values.model,
         modelCount: values.models?.length || 1,
       });
-      progress(intentId, "done", ENABLE_STEPS, { message: `${adapter.name} bağlandı.` });
+      report(intentId, "done", ENABLE_STEPS, { message: `${adapter.name} bağlandı.` });
       // The periodic monitor is part of keeping a connection alive, so it is put
       // in place as soon as there is a connection to watch. It can never fail the
       // switch: the configuration is already written and verified.
@@ -263,14 +270,21 @@ function createIntegrationService({
       return { ...result, ok: true, toolId: intentId, modelCount: values.models?.length || 1, defaultModel: values.model };
     } catch (error) {
       if (error?.code === CONFIRMATION_REQUIRED) {
-        // Nothing was changed and nothing was asked for yet - put the record back
-        // exactly as it was so a declined prompt cannot flip the switch.
-        if (previousIntent) intentStore.set(intentId, previousIntent.enabled, previousIntent.values);
-        else intentStore.set(intentId, false, values);
-        progress(intentId, "precheck", ENABLE_STEPS, { message: "Onay bekleniyor.", done: true });
+        report(intentId, "precheck", ENABLE_STEPS, { message: "Onay bekleniyor.", done: true });
         throw error;
       }
-      progress(intentId, "verify", ENABLE_STEPS, {
+      if (!intentCommitted) {
+        log?.warning("tools", `${adapter.name} işlemi ön denetimde durdu: ${errorCode(error)}`, {
+          toolId: intentId,
+          rollback: "not-required",
+        });
+        report(intentId, "done", ENABLE_STEPS, {
+          message: `${adapter.name} işlemi başlatılamadı.`,
+          error: errorCode(error),
+        });
+        throw error;
+      }
+      report(intentId, "verify", ENABLE_STEPS, {
         message: `${adapter.name} bağlanamadı; önceki ayarlarınız geri yükleniyor...`,
         error: errorCode(error),
       });
@@ -279,7 +293,7 @@ function createIntegrationService({
       intentStore.set(intentId, false, values);
       log?.error("tools", `${adapter.name} bağlanamadı: ${errorCode(error)}`, { toolId: intentId });
       await compensate(adapter, errorCode(error));
-      progress(intentId, "done", ENABLE_STEPS, {
+      report(intentId, "done", ENABLE_STEPS, {
         message: `${adapter.name} bağlanamadı.`,
         error: errorCode(error),
       });
@@ -329,14 +343,15 @@ function createIntegrationService({
     // touched and it is never taken back. An interrupted restore is finished by
     // the reconcile; a restore that needs permission to close an app still
     // leaves the switch off and the remaining work pending.
+    const report = progressFor(options);
     intentStore.set(intentId, false);
-    progress(intentId, "precheck", DISABLE_STEPS);
-    progress(intentId, "restore", DISABLE_STEPS);
+    report(intentId, "precheck", DISABLE_STEPS);
+    report(intentId, "restore", DISABLE_STEPS);
     const result = await adapter.revert(options);
-    progress(intentId, "verify", DISABLE_STEPS);
+    report(intentId, "verify", DISABLE_STEPS);
     const after = await adapter.status();
     if (after.applied) {
-      progress(intentId, "done", DISABLE_STEPS, {
+      report(intentId, "done", DISABLE_STEPS, {
         message: `${adapter.name} önceki ayarlarına döndürülemedi.`,
         error: "TOOL_RESTORE_VERIFY_FAILED",
       });
@@ -350,7 +365,7 @@ function createIntegrationService({
       toolId: intentId,
       restorePending: after.restorable === true,
     });
-    progress(intentId, "done", DISABLE_STEPS, {
+    report(intentId, "done", DISABLE_STEPS, {
       message: after.restorable === true
         ? "Bağlantı kapatıldı; geri yükleme tamamlanacak."
         : "Önceki ayarlarınız geri yüklendi.",
@@ -362,7 +377,7 @@ function createIntegrationService({
   // Compares every switch's recorded intent with what the machine actually looks
   // like, and closes the gap using the very same enable/disable paths the user's
   // own clicks use. There is no second copy of the on/off logic here.
-  async function reconcileOne(toolId, { trustSettled = false } = {}) {
+  async function reconcileOne(toolId, { trustSettled = false, reportProgress = true } = {}) {
     return withLock(toolId, async () => {
       const adapter = adapterFor(toolId);
       // Reading a switch's real state is not free: for Claude Desktop it means
@@ -381,6 +396,26 @@ function createIntegrationService({
         return { id: adapter.id, desiredEnabled: false, action: "none", ok: true, skipped: "settled" };
       }
       const status = await adapter.status();
+      if (status.installed === false) {
+        if (recorded?.enabled === true) {
+          intentStore.set(adapter.id, false, recorded.values);
+          log?.info("reconcile", `${adapter.name} kurulu olmadığı için eski açık anahtar kaydı kapatıldı`, {
+            toolId: adapter.id,
+            previousIntent: true,
+          });
+        }
+        if (!status.applied && !status.restorable) {
+          intentStore.markSettled(adapter.id);
+          return {
+            id: adapter.id,
+            desiredEnabled: false,
+            beforeApplied: false,
+            action: "none",
+            ok: true,
+            skipped: "not-installed",
+          };
+        }
+      }
       const intent = intentFor(adapter.id, status.applied);
       const outcome = {
         id: adapter.id,
@@ -404,7 +439,7 @@ function createIntegrationService({
             return { ...outcome, settled: true };
           }
           outcome.action = "restore";
-          const result = await disableUnlocked(adapter.id, { closeRunning: false });
+          const result = await disableUnlocked(adapter.id, { closeRunning: false, reportProgress });
           outcome.restorePending = result.restorePending === true;
           if (result.restorePending) {
             outcome.ok = false;
@@ -428,7 +463,7 @@ function createIntegrationService({
           return outcome;
         }
         outcome.action = "reapply";
-        await enableUnlocked(adapter.id, { closeRunning: false });
+        await enableUnlocked(adapter.id, { closeRunning: false, reportProgress });
         outcome.verified = true;
         return outcome;
       } catch (error) {
@@ -461,9 +496,10 @@ function createIntegrationService({
     running = (async () => {
       const startedAt = new Date().toISOString();
       const trustSettled = UNATTENDED_REASONS.has(reason);
+      const reportProgress = reason === "manual";
       log?.info("reconcile", `Tüm bağlantılar denetleniyor (${reason})`, { reason });
       const tools = [];
-      for (const toolId of switchIds()) tools.push(await reconcileOne(toolId, { trustSettled }));
+      for (const toolId of switchIds()) tools.push(await reconcileOne(toolId, { trustSettled, reportProgress }));
       // The monitor task only matters when something is actually connected;
       // registering it on an idle machine with every switch off is work nobody
       // asked for.
@@ -497,7 +533,7 @@ function createIntegrationService({
       statuses.push({
         id: adapter.id,
         name: adapter.name,
-        desiredEnabled: intent ? intent.enabled : status.applied,
+        desiredEnabled: status.installed === false ? false : (intent ? intent.enabled : status.applied),
         applied: status.applied,
         restorable: status.restorable,
         installed: status.installed,

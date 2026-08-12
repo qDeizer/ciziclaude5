@@ -1,11 +1,11 @@
 // Turns the account's model list into the values one tool adapter needs.
 //
-// Every model the key can call is offered to the tool, not just one, so the
-// picker inside Claude Code / Claude Desktop / Codex shows the whole list. The
-// first entry is the default, because all three products treat it that way.
-const { modelsForTool, modelName, toolIsGated } = require("../../renderer/modelFamilies");
+// Every model the server grants to a specific desktop client is offered to that
+// tool, not just one, so its own picker shows the complete authorized list.
+const { modelsForTool } = require("../../renderer/toolAccess");
 const {
   capabilityFor,
+  modelName,
   tierFor,
   CLAUDE_TIERS,
   claudeDesktopEffortAlias,
@@ -13,6 +13,7 @@ const {
 } = require("../../renderer/modelCapabilities");
 
 const CLAUDE_TOOL_ID = "claude-code";
+const CLAUDE_DESKTOP_TOOL_ID = "claude-desktop";
 const CODEX_TOOL_ID = "codex";
 
 // Tier order for picking a default: the strongest generally-available family
@@ -118,7 +119,11 @@ function gatewayFacts(name, gatewayModels) {
 
 function configurationForTool(toolId, accountModels, { currentModel, gatewayModels } = {}) {
   const gatewayIds = new Set((gatewayModels || []).map((id) => String(id || "").trim()).filter(Boolean));
-  const candidates = toolIsGated(toolId) ? modelsForTool(accountModels, toolId) : accountModels;
+  // The account profile explicitly declares which local client may use each
+  // model. Never infer access from a model id: an unknown/new model works on
+  // day one when the server grants it, and a familiar-looking id grants
+  // nothing unless the server says so.
+  const candidates = modelsForTool(accountModels, toolId);
   const compatible = uniqueModelNames(candidates);
   if (!compatible.length) {
     const error = new Error("Bu anahtar için bu araçla uyumlu model bulunamadı.");
@@ -126,7 +131,8 @@ function configurationForTool(toolId, accountModels, { currentModel, gatewayMode
     throw error;
   }
 
-  const model = preferredModel(toolId, compatible, currentModel);
+  const contractToolId = toolId === CLAUDE_DESKTOP_TOOL_ID ? CLAUDE_TOOL_ID : toolId;
+  const model = preferredModel(contractToolId, compatible, currentModel);
   const models = [model, ...compatible.filter((name) => name !== model)];
   const firstByName = new Map();
   for (const candidate of candidates || []) {
@@ -140,7 +146,7 @@ function configurationForTool(toolId, accountModels, { currentModel, gatewayMode
     const enriched = typeof candidate === "string"
       ? { name, ...gatewayFacts(name, gatewayIds) }
       : { ...candidate, name, ...gatewayFacts(name, gatewayIds) };
-    return capabilityFor(enriched, toolId);
+    return capabilityFor(enriched, contractToolId);
   });
   const activeProfile = modelProfiles.find((profile) => profile.name === model) || modelProfiles[0];
   const values = {
@@ -150,7 +156,7 @@ function configurationForTool(toolId, accountModels, { currentModel, gatewayMode
     contextWindowTokens: activeProfile.contextWindowTokens,
     reasoningEffort: activeProfile.defaultReasoningLevel,
   };
-  if (toolId === CLAUDE_TOOL_ID) {
+  if (contractToolId === CLAUDE_TOOL_ID) {
     for (const tier of CLAUDE_TIERS) {
       if (tier === "mythos") continue; // no ANTHROPIC_DEFAULT_MYTHOS_MODEL exists
       values[tier] = claudeTierModel(modelProfiles, tier, model);
@@ -161,6 +167,7 @@ function configurationForTool(toolId, accountModels, { currentModel, gatewayMode
 
 module.exports = {
   CLAUDE_TOOL_ID,
+  CLAUDE_DESKTOP_TOOL_ID,
   CODEX_TOOL_ID,
   uniqueModelNames,
   preferredModel,
