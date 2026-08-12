@@ -32,18 +32,30 @@ function createElevationRunner({ executablePath = process.execPath, workerPath =
       "try { $p=Start-Process -FilePath $env:COMSPEC -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList @('/d','/s','/c', ('set ELECTRON_RUN_AS_NODE=1&& \"' + $exe + '\" \"' + $argsJson[0] + '\" \"' + $argsJson[1] + '\"')) -Wait -ErrorAction Stop } catch { exit 1223 }",
       "exit $p.ExitCode",
     ].join(";");
+    let launchError = null;
     try {
       await runPowerShell(script, 180000);
     } catch (error) {
-      if (error?.code === "ELEVATION_FAILED" && /1223/.test(error.message)) {
-        throw codedError("ELEVATION_CANCELLED", "Yonetici izni onaylanmadi; Claude Desktop ayarlari degistirilmedi.");
-      }
-      throw error;
+      launchError = error?.code === "ELEVATION_FAILED" && /1223/.test(error.message)
+        ? codedError("ELEVATION_CANCELLED", "Yonetici izni onaylanmadi; Claude Desktop ayarlari degistirilmedi.")
+        : error;
     }
-    let report;
-    try { report = JSON.parse(fs.readFileSync(resultPath, "utf8")); } catch { throw codedError("ELEVATION_RESULT_MISSING", "Yonetici isleminin sonucu okunamadi."); }
+    // SIRA ONEMLI: sonuc dosyasi, PowerShell hata verse de once okunur.
+    //
+    // Yukseltilmis is basarisiz oldugunda cocuk surec 0'dan farkli bir kodla
+    // cikar, yani PowerShell de hata verir. Once ona bakip cikmak, isin gercek
+    // sebebini (dosyaya yazilmis kod ve mesaj) atip yerine "PowerShell exited
+    // with 1" koyuyordu - kullanicinin de gelistiricinin de eline hicbir sey
+    // gecmiyordu. Islem hic baslamadiysa dosya zaten yoktur ve baslatma hatasi
+    // bildirilir.
+    let report = null;
+    try { report = JSON.parse(fs.readFileSync(resultPath, "utf8")); } catch { report = null; }
     finally { try { fs.unlinkSync(resultPath); } catch {} }
-    if (!report?.ok) throw codedError(report?.code || "ELEVATED_BRANDING_FAILED", report?.message || "Yonetici islemi tamamlanamadi.");
+    if (report && !report.ok) {
+      throw codedError(report.code || "ELEVATED_BRANDING_FAILED", report.message || "Yonetici islemi tamamlanamadi.");
+    }
+    if (launchError) throw launchError;
+    if (!report) throw codedError("ELEVATION_RESULT_MISSING", "Yonetici isleminin sonucu okunamadi.");
     return report.result;
   }
   return { run };

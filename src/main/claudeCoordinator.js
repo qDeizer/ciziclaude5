@@ -72,6 +72,16 @@ const DESKTOP_MESSAGES = {
   ELEVATION_CANCELLED: "Windows yönetici onayı verilmedi; Claude Desktop ayarları değiştirilmedi.",
   ELEVATION_TIMEOUT: "Windows yönetici işlemi zaman aşımına uğradı. Tekrar deneyin.",
   ELEVATION_RESULT_MISSING: "Windows yönetici işleminin sonucu okunamadı. Claude Desktop ayarları değiştirilmedi.",
+  ELEVATION_REQUIRED: "Claude Desktop'ın kurulum dosyalarını değiştirmek için yönetici onayı gerekiyor. Tekrar deneyip Windows'un sorduğu izni onaylayın.",
+  ELEVATION_FAILED: "Windows yönetici işlemi tamamlanamadı. Tekrar deneyin.",
+  // Arayüz etiketleri Claude'un kendi dosyalarına yazılır; bu adımın hataları
+  // eskiden ham İngilizce motor mesajı olarak ekrana düşüyordu.
+  CLAUDE_RUNNING_FROM_TARGET: "Claude Desktop kurulu olduğu klasörden çalışıyor. Uygulamayı tamamen kapatıp tekrar deneyin.",
+  CLAUDE_BRANDING_UNAVAILABLE: "Cizi Code bu Claude Desktop sürümünün arayüz etiketlerini uygulayamadı.",
+  CLAUDE_BRANDING_VERIFY_FAILED: "Claude Desktop arayüz etiketleri yazıldı ama doğrulanamadı. Tekrar deneyin.",
+  ELEVATED_BRANDING_FAILED: "Claude Desktop dosyaları yönetici olarak düzenlenirken işlem tamamlanamadı. Tekrar deneyin.",
+  PARTIAL_PATCH_STATE: "Claude Desktop dosyalarının bir kısmı yarım kalmış. Anahtarı bir kez kapatıp tekrar açın.",
+  LIVE_FILE_DRIFTED: "Claude Desktop dosyaları beklenenden farklı. Anahtarı bir kez kapatıp tekrar açın.",
 };
 
 function desktopMessage(error) {

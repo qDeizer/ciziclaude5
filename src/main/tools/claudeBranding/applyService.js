@@ -33,14 +33,21 @@ function createApplyService({ logger, powershell, elevation, claudeProcess, lock
     return path.join(workRoot, version, "backup", "backup-manifest.json");
   }
 
-  // Yalnizca YAMALANACAK klasorden calisan bir surec varsa reddeder. Guncelleme
-  // sonrasi calisan Claude eski klasordedir; yeni klasoru yamalamak guvenlidir.
+  // Yalnizca YAMALANACAK klasorden calisan bir UYGULAMA sureci varsa reddeder.
+  // Guncelleme sonrasi calisan Claude eski klasordedir; yeni klasoru yamalamak
+  // guvenlidir. Paketin kendi Windows servisi de engel degildir (bkz.
+  // claudeProcess): kullanicinin kapatabilecegi bir sey degil ve yamalanan
+  // dosyalari kullanmiyor.
   async function assertTargetNotInUse(packageInfo) {
     const state = await claudeProcess.runsFrom(packageInfo.installLocation);
     if (state.runsFromTarget) {
+      // Hangi surecin engelledigi yaziyor: "kapat" denen sey kullanicinin
+      // ekraninda gorunmuyorsa mesaj tek basina hicbir sey anlatmiyordu.
       throw codedError(
         "CLAUDE_RUNNING_FROM_TARGET",
-        "Claude Desktop yamalanacak surumden calisiyor; once kapatilmali.",
+        `Claude Desktop yamalanacak surumden calisiyor; once kapatilmali (${
+          state.processes.map((item) => `${item.name}#${item.id}`).join(", ")
+        }).`,
       );
     }
     if (state.paths.length) {

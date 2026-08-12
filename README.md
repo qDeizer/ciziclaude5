@@ -149,6 +149,19 @@ Koordinatör katmanı iki ürünü tek anahtar altında birleştirir:
   ardından yeniden başlatmak uygulamanın kendiliğinden açılması gibi
   görünüyordu. Uygulamayı yalnızca kısayol ve arayüzdeki **Aç** düğmesi
   başlatır.
+- **Paketin Windows servisi "uygulama açık" sayılmaz.** Claude'un MSIX paketi
+  `CoworkVMService` adıyla LocalSystem altında, otomatik başlangıçla çalışan bir
+  servis kaydeder ve ikilisi (`app\resources\cowork-svc.exe`) tam da arayüz
+  etiketlerinin yazıldığı klasörün içindedir. "Hedef klasörden çalışan süreç
+  var mı" kontrolü bunu da sayınca anahtar hiçbir makinede açılamıyordu:
+  kullanıcı Claude Desktop'ı kapatsa bile servis çalışmaya devam ediyor ve
+  kapatması da mümkün değil. Artık paketin kaydettiği servislere ait süreçler
+  ayrılır (sınıflandırma `Win32_Service` üzerinden yapılır; o kayıt yönetici
+  olmadan da okunur, `Get-Process` ise SYSTEM süreçlerinin yolunu yalnızca
+  yöneticiye verir). Yamalanan dosyalar i18n katalogları ve arayüz paketidir;
+  servis ikilisi hiçbir zaman hedef değildir. Servis kaydı okunamazsa eski katı
+  davranışa düşülür. Gerçekten çalışan bir Claude Desktop hâlâ engeldir ve hata
+  mesajı artık hangi sürecin engellediğini yazar.
 
 Yardımcı dosyalar da taşındı: `src/main/bin/` içindeki
 `CiziClaudeCredentialHelper.exe` ve C# kaynak kodu.
