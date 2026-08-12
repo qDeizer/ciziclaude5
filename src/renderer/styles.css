@@ -52,7 +52,10 @@
 
 * { box-sizing: border-box; }
 
-html, body { min-width: 940px; min-height: 620px; }
+/* Pencerenin kendi alt sınırıyla aynı (main.js: minWidth 900, minHeight 640).
+   Büyük tutmak, kullanıcı pencereyi dibine kadar küçülttüğünde yatay kaydırma
+   çubuğu çıkarıyordu. */
+html, body { min-width: 900px; min-height: 620px; }
 
 body {
   margin: 0;
@@ -214,7 +217,9 @@ button:disabled { opacity: .4; cursor: default; }
 
 .app-content { min-height: 0; overflow: auto; padding: 16px 18px 20px; }
 .app-screen { width: min(1420px, 100%); margin: 0 auto; }
-.dashboard-screen { display: grid; gap: 14px; }
+/* Harita üç sabit kolondan oluşuyor; panel bundan çok genişleyince kolonlar
+   ortada küçük bir ada gibi kalıp iki yanda ölü alan bırakıyor. */
+.dashboard-screen { width: min(1240px, 100%); display: grid; gap: 14px; }
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg); }
 .panel-head {
@@ -281,11 +286,14 @@ button:disabled { opacity: .4; cursor: default; }
   letter-spacing: .12em;
 }
 #connection-map .cbh__coltitle--provider { text-align: left; }
+/* Tank kolonu doldurmayı bıraktığı için (max-height) model listesine göre
+   ortalanır; yoksa uzun listede tepede asılı kalıyor. */
+#connection-map .cbh__col--provider { justify-content: center; }
 #connection-map .cbh__card { box-shadow: none; }
 #connection-map .cbh__mname,
 #connection-map .cbh__tname { font-size: 13px; font-weight: 500; }
 #connection-map .cbh__meta { color: var(--ink-dim); font-size: 11px; }
-#connection-map .cbh__icon--model { width: 15px; height: 15px; }
+#connection-map .cbh__icon--model { width: 17px; height: 17px; }
 
 #connection-map .cbh__card--model,
 #connection-map .cbh__card--tool {
@@ -293,15 +301,19 @@ button:disabled { opacity: .4; cursor: default; }
     border-color 160ms var(--ease), background 160ms var(--ease),
     opacity var(--in-dur, 500ms), transform var(--in-dur, 500ms), filter var(--in-dur, 500ms);
 }
+/* Hiçbir yerel araca bağlanmayan model: bağlı olanlarla aynı ağırlıkta
+   duramaz, ama listeden de gizlenmez — hesapta var. */
+#connection-map .cbh__card--model.is-unlinked .cbh__mname,
+#connection-map .cbh__card--model.is-unlinked .cbh__icon--model { opacity: .5; }
 #connection-map .cbh__card--tool { cursor: pointer; padding-right: 32px; }
 #connection-map .cbh__card--tool:hover { background: var(--raised); border-color: var(--line-strong); }
 #connection-map .cbh__card--tool::after {
   content: "";
   position: absolute;
   right: 14px; top: 50%;
-  width: 7px; height: 7px;
-  border-top: 1.8px solid var(--accent);
-  border-right: 1.8px solid var(--accent);
+  width: 8px; height: 8px;
+  border-top: 2.2px solid var(--accent);
+  border-right: 2.2px solid var(--accent);
   transform: translateY(-50%) rotate(45deg);
 }
 #connection-map .cbh__card--tool .cbh__dot { margin-left: auto; }
@@ -310,9 +322,11 @@ button:disabled { opacity: .4; cursor: default; }
    Tank provider kartının kendisidir. Sıvı kartın içine kırpılır; dalga
    YALNIZCA yatay ötelenir, döndürülmez — döndürülen bir elips kartın dışına
    taşıp köşegen bıçaklar bırakıyordu. */
+/* Tank model kolonu kadar uzar ama bir yere kadar: hesapta 7 model varken
+   kolon 424px oluyor ve tank ekranı yutan hareketsiz bir levhaya dönüşüyordu. */
 #connection-map .cbh__card--provider {
   height: 100%;
-  min-height: 100%;
+  max-height: 300px;
   display: block;
   padding: 0;
   overflow: hidden;
@@ -367,32 +381,29 @@ button:disabled { opacity: .4; cursor: default; }
   font: 600 17px/1 var(--brand-font);
   letter-spacing: .01em;
 }
-/* Okuma bloğu tankın ortasında sabit durur: su seviyesine bindirmek %95'te
-   marka adının, %5'te sıvının üstüne biniyordu. Rengi durumu taşır. */
-.tank-readout {
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 3px;
-  pointer-events: none;
-}
+/* Yüzde su seviyesine biner. clamp olmadan %100'de marka adının üstüne,
+   %5'te tankın dibinden aşağı taşıyordu. */
 .tank-value {
+  position: absolute;
+  left: 0; right: 0;
+  top: clamp(56px, calc(100% - var(--quota-level, 100%)), calc(100% - 26px));
+  z-index: 3;
   color: var(--tank-value);
+  text-align: center;
   font: 600 30px/1 var(--mono);
   font-variant-numeric: tabular-nums;
   letter-spacing: -.02em;
-  text-shadow: 0 1px 6px rgb(0 0 0 / 45%);
-  transition: color 400ms var(--ease);
+  text-shadow: 0 1px 6px rgb(0 0 0 / 55%);
+  transform: translateY(-50%);
+  transition: top 800ms var(--ease), color 400ms var(--ease);
 }
-.tank-caption {
-  color: rgb(255 255 255 / 72%);
-  font-size: 10px;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  text-shadow: 0 1px 4px rgb(0 0 0 / 55%);
+
+/* Sınırsız planda okunacak bir seviye yok: ∞ ortada ve büyük durur. Sıvı yine
+   de tepeye kadar doldurulmaz, yoksa dalga kırpılır ve tank ölü bir blok olur. */
+.usage-unlimited .tank-value {
+  top: 50%;
+  font-size: 40px;
+  letter-spacing: 0;
 }
 
 /* Kalan hak azaldıkça sıvı ve sayı kızarır. */

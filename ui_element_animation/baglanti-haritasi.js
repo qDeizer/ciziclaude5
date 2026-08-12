@@ -270,13 +270,35 @@
       self[k].setAttribute('preserveAspectRatio', 'none');
     });
 
+    // Kartlar offset zinciriyle ölçülür, getBoundingClientRect ile DEĞİL.
+    //
+    // Bunun bedeli yaşanarak öğrenildi: kartlar giriş animasyonu boyunca
+    // `translateX(-26px) scale(.93)` durumunda duruyor ve getBoundingClientRect
+    // dönüştürülmüş kutuyu veriyor. layout() o sırada çağrıldığında kablolar
+    // 300px'lik kartın değil 279px'lik hayaletin kenarına bağlanıyor, kart
+    // yerine oturduğunda da orada kalıyordu — uçlar ancak sonradan bir relayout
+    // tetiklendiğinde kartlara değiyordu. offsetLeft/offsetWidth dönüşümleri
+    // yok sayar, yani kartın nihai yerleşim kutusunu verir.
+    var stage = this.stage;
     function box(node) {
-      var r = node.getBoundingClientRect();
-      return {
-        left: r.left - sr.left, right: r.right - sr.left,
-        top: r.top - sr.top, bottom: r.bottom - sr.top,
-        cy: r.top - sr.top + r.height / 2
-      };
+      var x = 0, y = 0, el = node;
+      while (el && el !== stage) {
+        x += el.offsetLeft;
+        y += el.offsetTop;
+        el = el.offsetParent;
+      }
+      // Zincir stage'e ulaşmadıysa (araya transform'lu bir ata girmişse)
+      // ölçüm anlamsızdır; görsel kutuya düşülür.
+      if (!el) {
+        var r = node.getBoundingClientRect();
+        return {
+          left: r.left - sr.left, right: r.right - sr.left,
+          top: r.top - sr.top, bottom: r.bottom - sr.top,
+          cy: r.top - sr.top + r.height / 2
+        };
+      }
+      var w = node.offsetWidth, h = node.offsetHeight;
+      return { left: x, right: x + w, top: y, bottom: y + h, cy: y + h / 2 };
     }
 
     var pb = box(this.providerCard);

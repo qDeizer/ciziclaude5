@@ -490,16 +490,11 @@ function tankElements() {
   brand.className = "tank-brand";
   brand.textContent = "Cizi Code";
 
-  // Yüzde ve etiketi birlikte ortalanır. Etiketi tankın DİBİNE sabitlemek,
-  // hak %10'un altına düştüğünde onu kızarmış sıvının içinde bırakıyordu.
-  const readout = document.createElement("span");
-  readout.className = "tank-readout";
+  // Yüzde su seviyesine biner (eskizdeki gibi). Konumu CSS'te clamp'lenir:
+  // %100'de marka adının, %5'te tankın dibinin dışına taşardı.
   const value = document.createElement("span");
   value.className = "tank-value";
-  const caption = document.createElement("span");
-  caption.className = "tank-caption";
-  readout.append(value, caption);
-  return [liquid, brand, readout];
+  return [liquid, brand, value];
 }
 
 function updateUsageTank() {
@@ -507,28 +502,19 @@ function updateUsageTank() {
   if (!provider) return;
   const { percent, unlimited, label } = QUOTA_VIEW;
   provider.classList.remove("usage-warn", "usage-bad");
+  provider.classList.toggle("usage-unlimited", unlimited);
   if (!unlimited && percent <= 10) provider.classList.add("usage-bad");
   else if (!unlimited && percent <= 30) provider.classList.add("usage-warn");
-  provider.style.setProperty("--quota-level", `${percent}%`);
+  // Sıvı tavana dayanmaz. İki sebep: tepeye kadar dolu tankta dalga kırpılıp
+  // tank cansız bir levhaya dönüşüyor, ve marka adının oturduğu şerit su
+  // yüzeyiyle çakışıyordu. %88 tavanı her iki sorunu da kapatır, "dolu"
+  // algısını bozmaz.
+  provider.style.setProperty("--quota-level", `${Math.min(percent, 88)}%`);
   const value = provider.querySelector(".tank-value");
   if (value) value.textContent = label;
-  const caption = provider.querySelector(".tank-caption");
-  if (caption) caption.textContent = unlimited ? "Sınırsız" : "Kalan hak";
   provider.title = unlimited
     ? "Planınız şu an sınırsız."
     : `Kullanım hakkınızın %${percent}'i kaldı.`;
-}
-
-// Panel başlığı süs değil sayım: kaç araç sunuluyor, kaçı gerçekten bağlı.
-function renderMapSummary(tools, byStatus) {
-  const summary = $("map-summary");
-  if (!summary) return;
-  if (!tools.length) {
-    summary.textContent = "Bu profil için yapılandırılabilir bir yerel araç yok";
-    return;
-  }
-  const connected = tools.filter((tool) => byStatus.get(tool.switchId)?.applied === true).length;
-  summary.textContent = `${tools.length} araç · ${connected} bağlı`;
 }
 
 function renderConnectionMap() {
@@ -540,9 +526,14 @@ function renderConnectionMap() {
   const offered = accessibleToolIds(models);
   const tools = dashboardToolNodes(offered);
   const toolIndex = new Map(tools.map((tool, index) => [tool.key, index]));
+  // Sunucu her modele erişim sözleşmesini (`desktopClients`) iliştirmiyor.
+  // Hesapta yedi model varken üçünde bu alan dolu geliyor; kalanlar hiçbir
+  // yerel araca bağlanmıyor. Hepsine "Erişilebilir" demek, arayüzün arkasını
+  // dolduramadığı bir söz vermesi olurdu.
+  const clientsPerModel = models.map((model) => desktopClients(model));
   const links = [];
   models.forEach((model, modelIndex) => {
-    for (const client of desktopClients(model)) {
+    for (const client of clientsPerModel[modelIndex]) {
       const keys = client === CODEX ? [CODEX_CLI_PRODUCT, CODEX_DESKTOP_PRODUCT] : [client];
       for (const key of keys) {
         if (toolIndex.has(key)) links.push([modelIndex, toolIndex.get(key)]);
@@ -556,7 +547,10 @@ function renderConnectionMap() {
     speed: 1.55,
     data: {
       provider: { name: "Cizi Code", status: "", icon: "cloud" },
-      models: models.map((model) => ({ name: displayModelName(modelName(model)), meta: "Erişilebilir" })),
+      models: models.map((model, index) => ({
+        name: displayModelName(modelName(model)),
+        meta: clientsPerModel[index].length ? "Erişilebilir" : "Araç yok",
+      })),
       tools: tools.map((tool) => ({ name: tool.name, icon: tool.icon })),
       links,
     },
@@ -573,6 +567,13 @@ function renderConnectionMap() {
     updateUsageTank();
   }
 
+  CONNECTION_MAP.modelCards.forEach((modelCard, index) => {
+    if (clientsPerModel[index]?.length) return;
+    modelCard.classList.add("is-unlinked");
+    modelCard.querySelector(".cbh__dot")?.classList.add("cbh__dot--muted");
+    modelCard.title = "Bu model hesabınızda hiçbir yerel araca tanımlı değil.";
+  });
+
   // Kablo uçlarındaki pinler animasyonun ortasında (1.8 sn) doğuyor ve o anki
   // ölçüme göre yerleşiyor. Kolon genişlikleri ise daha geç kesinleşiyor:
   // grafik çizilince dikey kaydırma çubuğu geliyor, yazı tipi sonra yükleniyor.
@@ -584,7 +585,6 @@ function renderConnectionMap() {
   document.fonts?.ready?.then(relayout);
 
   const byStatus = new Map(LAST_TOOL_STATUSES.map((status) => [status.id, status]));
-  renderMapSummary(tools, byStatus);
   CONNECTION_MAP.toolCards.forEach((toolCard, index) => {
     const tool = tools[index];
     if (!tool) return;
@@ -1663,7 +1663,6 @@ $("login-key").addEventListener("keydown", (event) => { if (event.key === "Enter
 
 $("screen-dashboard").addEventListener("click", () => showAppScreen("dashboard"));
 $("screen-config").addEventListener("click", () => showAppScreen("config"));
-$("open-config").addEventListener("click", () => showAppScreen("config"));
 
 $("logout-btn").addEventListener("click", async () => {
   clog("info", "Çıkış yapıldı");

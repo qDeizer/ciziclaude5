@@ -151,7 +151,9 @@ function createWindow() {
     height: 760,
     minWidth: 900,
     minHeight: 640,
-    backgroundColor: "#e9e4ce",
+    // Arayüzün zemin rengiyle aynı (styles.css --ground). Krem bir değer,
+    // pencere açılırken koyu arayüzün üstüne beyaz bir flaş bırakıyordu.
+    backgroundColor: "#0a1017",
     title: "Cizi Code",
     icon: path.join(__dirname, "..", "..", "assets", "icon.ico"),
     autoHideMenuBar: true,
