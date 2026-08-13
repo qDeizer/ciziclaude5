@@ -75,17 +75,26 @@
         <section class="panel usage-chart-panel">
           <div class="panel-head">
             <div>
-              <h2>Kullanım eğilimi</h2>
+              <h2>Kullanım ritmi</h2>
               <p id="usage-updated" class="panel-summary">Henüz yenilenmedi</p>
             </div>
-            <select id="period-select" data-cli-id="period-select" class="select" aria-label="Dönem">
+            <div class="usage-chart-head-meta">
+              <span id="usage-scale-note" class="usage-scale-note">Her nokta bir gün</span>
+              <select id="period-select" data-cli-id="period-select" class="select usage-period-select" aria-label="Dönem">
               <option value="today">Bugün</option>
-              <option value="7d">7 gün</option>
-              <option value="30d" selected>30 gün</option>
-              <option value="60d">60 gün</option>
-            </select>
+              <option value="7d">Son 7 gün</option>
+              <option value="30d" selected>Son 30 gün</option>
+              <option value="60d">Son 60 gün</option>
+              </select>
+            </div>
           </div>
-          <div class="chart-body"><canvas id="usage-chart"></canvas></div>
+          <div class="dashboard-chart-body">
+            <canvas id="usage-chart" role="img" aria-label="Günlük kullanım yüzdeleri"></canvas>
+            <div id="usage-chart-tooltip" class="usage-chart-tooltip hidden" aria-hidden="true">
+              <strong id="usage-tooltip-value"></strong>
+              <span id="usage-tooltip-day"></span>
+            </div>
+          </div>
         </section>
       </section>
 
@@ -108,11 +117,68 @@
           </div>
           <div id="tools-list" class="config-detail"></div>
         </section>
+
+        <section class="panel config-models-panel" aria-labelledby="config-models-title">
+          <div class="panel-head compact-panel-head">
+            <div>
+              <span class="workspace-label">Hesabınız</span>
+              <h2 id="config-models-title">Erişilebilir modeller</h2>
+            </div>
+          </div>
+          <div id="model-chips" class="config-model-list"></div>
+        </section>
+
+        <section class="panel config-usage-panel" aria-labelledby="config-usage-title">
+          <div class="panel-head compact-panel-head">
+            <div>
+              <h2 id="config-usage-title">Kullanım akışı</h2>
+              <p id="config-usage-updated" class="panel-summary">Hesap hareketi hazırlanıyor</p>
+            </div>
+          </div>
+          <div class="config-usage-body">
+            <div class="config-usage-legend" aria-hidden="true">
+              <span class="config-usage-legend-line"></span>
+              <span>Hareket yoğunluğu</span>
+            </div>
+            <div class="config-usage-plot">
+              <canvas id="config-usage-chart" role="img" aria-label="Kullanım hareketi grafiği"></canvas>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel config-quota-panel" aria-labelledby="config-quota-title">
+          <div class="panel-head compact-panel-head">
+            <div>
+              <span class="workspace-label">Hesabınız</span>
+              <h2 id="config-quota-title">Kalan kullanım</h2>
+            </div>
+          </div>
+          <div class="config-quota-body">
+            <div id="config-usage-gauge" class="config-usage-gauge" role="meter"
+              aria-label="Kalan kullanım" aria-valuemin="0" aria-valuemax="100">
+              <svg class="config-gauge-ring" viewBox="0 0 160 160" aria-hidden="true">
+                <circle class="config-gauge-track" cx="80" cy="80" r="62" pathLength="100"></circle>
+                <circle class="config-gauge-progress" cx="80" cy="80" r="62" pathLength="100"></circle>
+              </svg>
+              <div class="config-gauge-center">
+                <span class="config-gauge-kicker">Kalan</span>
+                <strong id="config-gauge-value" class="config-gauge-value">∞</strong>
+                <span class="config-gauge-unit">kullanım</span>
+              </div>
+            </div>
+            <div class="config-quota-brand">
+              <img src="../../assets/logo.png" alt="" />
+              <div>
+                <strong>Cizi Code</strong>
+                <span id="config-quota-note">Hesap durumu hazırlanıyor</span>
+              </div>
+            </div>
+          </div>
+        </section>
       </section>
     </main>
   </section>
 
-  <div id="model-chips" class="hidden" aria-hidden="true"></div>
   <div id="quota-meter" class="hidden" aria-hidden="true">
     <span id="quota-fill"></span><span id="quota-pct"></span>
   </div>

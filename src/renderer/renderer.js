@@ -61,8 +61,10 @@ let CONNECTION_MAP = null;
 let QUOTA_VIEW = { percent: 100, unlimited: true, label: "∞" };
 let HAS_ANIMATED_USAGE_TANK = false;
 let HAS_PRESENTED_CONNECTION_MAP = false;
+let USAGE_CHART_ANIMATION_FRAME = null;
 
 const USAGE_TANK_ENTRY_MS = 1400;
+const USAGE_CHART_ENTRY_MS = 1100;
 
 // ----------------------------------------------------------------- yardımcı
 
@@ -140,10 +142,8 @@ function showAppScreen(screen, selectedToolId = null) {
   }
 
   requestAnimationFrame(() => {
-    if (CURRENT_SCREEN === "dashboard") {
-      CONNECTION_MAP?.layout?.();
-      drawChart(LAST_USAGE_SERIES);
-    }
+    if (CURRENT_SCREEN === "dashboard") CONNECTION_MAP?.layout?.();
+    drawChart(LAST_USAGE_SERIES);
   });
 }
 
@@ -321,9 +321,13 @@ function renderQuota(me) {
 }
 
 function renderLastRefresh() {
-  $("usage-updated").textContent = LAST_REFRESH
+  const text = LAST_REFRESH
     ? `Son yenileme ${LAST_REFRESH.toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`
     : "Henüz yenilenmedi";
+  const dashboardLabel = $("usage-updated");
+  const configLabel = $("config-usage-updated");
+  if (dashboardLabel) dashboardLabel.textContent = text;
+  if (configLabel) configLabel.textContent = LAST_REFRESH ? "Hesap hareketi güncel" : "Henüz hareket verisi yok";
 }
 
 function renderModels(models) {
@@ -374,7 +378,7 @@ async function loadUsage(period) {
     positive: series.filter((point) => chartValue(point) > 0).length,
     sampleKeys: series.length ? Object.keys(series[0]).slice(0, 8) : [],
   });
-  drawChart(series);
+  drawChart(series, { animateDashboard: true });
 }
 
 function chartValue(point) {
@@ -383,11 +387,50 @@ function chartValue(point) {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function drawChart(data) {
-  const canvas = $("usage-chart");
-  // Tuval artan alanı doldurduğu için yükseklik sabit değil, ölçülür.
+function drawChart(data, { animateDashboard = false } = {}) {
+  const dashboardCanvas = $("usage-chart");
+  const configCanvas = $("config-usage-chart");
+  if (dashboardCanvas) {
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (animateDashboard && CURRENT_SCREEN === "dashboard" && !reducedMotion) {
+      animateUsageChart(dashboardCanvas, data);
+    } else {
+      cancelAnimationFrame(USAGE_CHART_ANIMATION_FRAME);
+      USAGE_CHART_ANIMATION_FRAME = null;
+      drawUsageChart(dashboardCanvas, data);
+    }
+  }
+  if (configCanvas) drawConfigUsageChart(configCanvas, data);
+}
+
+function animateUsageChart(canvas, data) {
+  cancelAnimationFrame(USAGE_CHART_ANIMATION_FRAME);
+  USAGE_CHART_ANIMATION_FRAME = null;
+  const hasUsage = data.length && data.some((point) => chartValue(point) > 0);
+  if (!hasUsage) {
+    drawUsageChart(canvas, data);
+    return;
+  }
+
+  const startedAt = performance.now();
+  const paintFrame = (now) => {
+    const progress = Math.min(1, Math.max(0, (now - startedAt) / USAGE_CHART_ENTRY_MS));
+    // Hızlı başlar, son yüzdeye yaklaşırken yumuşar; kablo akışının mevcut
+    // cubic-bezier karakterine yakın ama tuval üzerinde hesaplanabilir bir eğri.
+    const eased = 1 - Math.pow(1 - progress, 3);
+    drawUsageChart(canvas, data, eased);
+    if (progress < 1) {
+      USAGE_CHART_ANIMATION_FRAME = requestAnimationFrame(paintFrame);
+    } else {
+      USAGE_CHART_ANIMATION_FRAME = null;
+    }
+  };
+  USAGE_CHART_ANIMATION_FRAME = requestAnimationFrame(paintFrame);
+}
+
+function drawConfigUsageChart(canvas, data) {
   const width = canvas.clientWidth || canvas.parentElement.clientWidth || 320;
-  const height = canvas.clientHeight || 104;
+  const height = canvas.clientHeight || canvas.parentElement.clientHeight || 120;
   const ratio = window.devicePixelRatio || 1;
   canvas.width = width * ratio;
   canvas.height = height * ratio;
@@ -396,53 +439,283 @@ function drawChart(data) {
   ctx.clearRect(0, 0, width, height);
 
   const values = data.map(chartValue);
-  const soft = token("--ink-soft");
   if (!data.length || values.every((value) => value <= 0)) {
-    ctx.fillStyle = soft;
+    ctx.strokeStyle = token("--line-strong");
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(18, height / 2);
+    ctx.lineTo(width - 18, height / 2);
+    ctx.stroke();
+    ctx.fillStyle = token("--ink-soft");
     ctx.font = `12px ${token("--font") || "sans-serif"}`;
     ctx.textAlign = "center";
-    ctx.fillText("Bu dönem için henüz kullanım verisi yok.", width / 2, height / 2);
+    ctx.fillText("Henüz yeterli hareket yok", width / 2, height / 2 - 14);
     return;
   }
 
-  const pad = { left: 2, right: 2, top: 8, bottom: 18 };
+  const pad = { left: 12, right: 12, top: 12, bottom: 12 };
+  const innerWidth = Math.max(1, width - pad.left - pad.right);
+  const innerHeight = Math.max(1, height - pad.top - pad.bottom);
   const max = Math.max(1, ...values);
-  const barWidth = (width - pad.left - pad.right) / data.length;
-  const gradient = ctx.createLinearGradient(0, pad.top, 0, height - pad.bottom);
-  gradient.addColorStop(0, token("--accent"));
-  gradient.addColorStop(1, token("--accent-deep"));
+  const denominator = Math.max(1, values.length - 1);
+  const points = values.map((value, index) => ({
+    x: pad.left + (index / denominator) * innerWidth,
+    y: pad.top + innerHeight - (value / max) * innerHeight,
+  }));
 
-  // Kullanımı olmayan gün de bir gündür: sıfır değerler 1 piksellik bir iz
-  // bırakır. Hiç çizmemek, tek günlük kullanımı olan bir hesapta grafiği bozuk
-  // gibi gösteriyordu.
-  values.forEach((value, index) => {
-    const scaled = (value / max) * (height - pad.top - pad.bottom);
-    const barHeight = Math.max(scaled, 1);
-    const x = pad.left + index * barWidth;
-    const y = height - pad.bottom - barHeight;
-    ctx.fillStyle = value > 0 ? gradient : token("--line");
-    // Çubuk yuvanın tamamını doldurmaz: 30 günlük seride bitişik çubuklar tek
-    // bir renk duvarına dönüşüp günleri okunmaz yapıyordu.
-    const w = Math.max(2, Math.min(barWidth - 3, barWidth * 0.62));
-    const r = Math.min(3, w / 2);
+  ctx.save();
+  ctx.strokeStyle = token("--line");
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 6]);
+  for (let index = 1; index <= 2; index += 1) {
+    const y = pad.top + (innerHeight * index) / 3;
     ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + barHeight, r);
-    ctx.arcTo(x + w, y + barHeight, x, y + barHeight, r);
-    ctx.arcTo(x, y + barHeight, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(width - pad.right, y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  const trace = () => {
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const current = points[index];
+      const midpoint = (previous.x + current.x) / 2;
+      ctx.bezierCurveTo(midpoint, previous.y, midpoint, current.y, current.x, current.y);
+    }
+  };
+
+  const fill = ctx.createLinearGradient(0, pad.top, 0, height - pad.bottom);
+  fill.addColorStop(0, "rgb(255 142 37 / 34%)");
+  fill.addColorStop(0.72, "rgb(249 115 22 / 8%)");
+  fill.addColorStop(1, "rgb(249 115 22 / 0%)");
+  ctx.beginPath();
+  trace();
+  ctx.lineTo(points[points.length - 1].x, height - pad.bottom);
+  ctx.lineTo(points[0].x, height - pad.bottom);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+
+  ctx.beginPath();
+  trace();
+  ctx.strokeStyle = token("--usage-flow");
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "rgb(249 115 22 / 38%)";
+  ctx.shadowBlur = 8;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  let lastActiveIndex = values.length - 1;
+  while (lastActiveIndex > 0 && values[lastActiveIndex] <= 0) lastActiveIndex -= 1;
+  const endpoint = points[lastActiveIndex];
+  ctx.beginPath();
+  ctx.arc(endpoint.x, endpoint.y, 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = token("--usage-flow");
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(endpoint.x, endpoint.y, 7, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgb(255 142 37 / 28%)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+}
+
+function drawUsageChart(canvas, data, entranceProgress = 1) {
+  // Panel grafiği günlük yoğunluğu sütunlarla değil, kabloların akış dilini
+  // sürdüren bir alan çizgisiyle anlatır. Doğrudan yüzde gelmeyen eski sunucu
+  // sürümlerinde değerler en yoğun güne göre normalize edilir.
+  $("usage-chart-tooltip")?.classList.add("hidden");
+  const width = canvas.clientWidth || canvas.parentElement.clientWidth || 320;
+  const height = canvas.clientHeight || canvas.parentElement.clientHeight || 104;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const values = chartPercentageValues(data);
+  const soft = token("--ink-soft");
+  if (!data.length || values.every((value) => value <= 0)) {
+    canvas.__usageChartMeta = null;
+    canvas.setAttribute("aria-label", "Seçili dönem için kullanım hareketi yok");
+    $("usage-chart-tooltip")?.classList.add("hidden");
+    ctx.fillStyle = soft;
+    ctx.font = `12px ${token("--font") || "sans-serif"}`;
+    ctx.textAlign = "center";
+    ctx.fillText("Bu dönem için henüz kullanım hareketi yok.", width / 2, height / 2);
+    return;
+  }
+
+  const pad = { left: 36, right: 18, top: 38, bottom: 34 };
+  const innerWidth = Math.max(1, width - pad.left - pad.right);
+  const innerHeight = Math.max(1, height - pad.top - pad.bottom);
+  const denominator = Math.max(1, values.length - 1);
+  const progress = Math.max(0, Math.min(1, entranceProgress));
+  const animatedValues = values.map((value, index) => {
+    const pointDelay = (index / denominator) * .38;
+    const localProgress = Math.max(0, Math.min(1, (progress - pointDelay) / (1 - pointDelay)));
+    const easedPoint = 1 - Math.pow(1 - localProgress, 3);
+    return value * easedPoint;
+  });
+  const points = animatedValues.map((value, index) => ({
+    x: pad.left + (index / denominator) * innerWidth,
+    y: pad.top + innerHeight - (value / 100) * innerHeight,
+  }));
+
+  ctx.save();
+  ctx.strokeStyle = token("--line");
+  ctx.fillStyle = token("--ink-dim");
+  ctx.font = `9px ${token("--mono") || "monospace"}`;
+  ctx.textAlign = "right";
+  ctx.setLineDash([3, 6]);
+  for (const percentage of [25, 50, 75]) {
+    const y = pad.top + innerHeight - (percentage / 100) * innerHeight;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(width - pad.right, y);
+    ctx.stroke();
+    ctx.fillText(`%${percentage}`, pad.left - 7, y + 3);
+  }
+  ctx.restore();
+
+  const trace = () => {
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const current = points[index];
+      const midpoint = (previous.x + current.x) / 2;
+      ctx.bezierCurveTo(midpoint, previous.y, midpoint, current.y, current.x, current.y);
+    }
+  };
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(pad.left - 10, 0, Math.max(1, innerWidth * progress + 12), height);
+  ctx.clip();
+
+  const fill = ctx.createLinearGradient(0, pad.top, 0, height - pad.bottom);
+  fill.addColorStop(0, "rgb(255 142 37 / 38%)");
+  fill.addColorStop(0.68, "rgb(249 115 22 / 9%)");
+  fill.addColorStop(1, "rgb(249 115 22 / 0%)");
+  ctx.beginPath();
+  trace();
+  ctx.lineTo(points[points.length - 1].x, height - pad.bottom);
+  ctx.lineTo(points[0].x, height - pad.bottom);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+
+  ctx.beginPath();
+  trace();
+  ctx.strokeStyle = token("--usage-flow");
+  ctx.lineWidth = 2.2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "rgb(249 115 22 / 42%)";
+  ctx.shadowBlur = 9;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  values.forEach((value, index) => {
+    const revealAt = (index / denominator) * .72;
+    if (progress < revealAt) return;
+    const point = points[index];
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, value > 0 ? 3.3 : 1.8, 0, Math.PI * 2);
+    ctx.fillStyle = value > 0 ? token("--usage-flow") : token("--line-strong");
     ctx.fill();
+
+    const pointSpacing = innerWidth / denominator;
+    const canLabelZero = value <= 0 && pointSpacing >= 24;
+    if (value <= 0 && !canLabelZero) return;
+    const labelY = Math.max(13, point.y - (index % 2 === 0 ? 11 : 20));
+    ctx.fillStyle = value > 0 ? token("--usage-flow") : token("--ink-dim");
+    ctx.font = `${value > 0 ? "600" : "400"} 10px ${token("--mono") || "monospace"}`;
+    ctx.textAlign = "center";
+    ctx.fillText(`%${formatUsagePercentage(animatedValues[index])}`, point.x, labelY);
   });
 
   ctx.fillStyle = soft;
-  ctx.textAlign = "left";
+  ctx.textAlign = "center";
   ctx.font = `10px ${token("--mono") || "monospace"}`;
-  const step = Math.max(1, Math.ceil(data.length / 6));
+  const maxDayLabels = Math.max(2, Math.floor(innerWidth / 82));
+  const step = Math.max(1, Math.ceil(data.length / maxDayLabels));
   data.forEach((point, index) => {
     if (index % step !== 0 && index !== data.length - 1) return;
-    ctx.fillText(String(point.label || ""), pad.left + index * barWidth, height - 5);
+    ctx.fillText(localizeChartDay(point?.label, index), points[index].x, height - 11);
   });
+
+  if (progress >= 1) {
+    canvas.__usageChartMeta = { data, values, points, pad, width, height };
+    canvas.setAttribute("aria-label", `Günlük kullanım yüzdeleri: ${data.map((point, index) => (
+      `${localizeChartDay(point?.label, index)} yüzde ${formatUsagePercentage(values[index])}`
+    )).join(", ")}`);
+    bindUsageChartInteraction(canvas);
+  } else {
+    canvas.__usageChartMeta = null;
+  }
+}
+
+function chartPercentageValues(data) {
+  const raw = data.map(chartValue);
+  const rawMax = Math.max(0, ...raw);
+  return data.map((point, index) => {
+    const direct = Number(point?.percent ?? point?.usagePercent);
+    const percentage = Number.isFinite(direct)
+      ? direct
+      : rawMax > 0 ? (raw[index] / rawMax) * 100 : 0;
+    return Math.max(0, Math.min(100, percentage));
+  });
+}
+
+function formatUsagePercentage(value) {
+  if (!Number.isFinite(value)) return "0";
+  return value > 0 && value < 1 ? value.toFixed(1) : String(Math.round(value));
+}
+
+function localizeChartDay(label, index) {
+  const value = String(label || "").trim();
+  const englishMonth = value.match(/^([A-Za-z]{3})\s+(\d{1,2})$/);
+  if (englishMonth) {
+    const months = { Jan: "Oca", Feb: "Şub", Mar: "Mar", Apr: "Nis", May: "May", Jun: "Haz", Jul: "Tem", Aug: "Ağu", Sep: "Eyl", Oct: "Eki", Nov: "Kas", Dec: "Ara" };
+    return `${englishMonth[2]} ${months[englishMonth[1]] || englishMonth[1]}`;
+  }
+  const date = new Date(value);
+  if (value && Number.isFinite(date.getTime())) {
+    return date.toLocaleDateString("tr-TR", { day: "numeric", month: "short" }).replace(".", "");
+  }
+  return value || `${index + 1}. gün`;
+}
+
+function bindUsageChartInteraction(canvas) {
+  if (canvas.__usageInteractionBound) return;
+  canvas.__usageInteractionBound = true;
+
+  canvas.addEventListener("pointermove", (event) => {
+    const meta = canvas.__usageChartMeta;
+    const tooltip = $("usage-chart-tooltip");
+    if (!meta || !tooltip || !meta.points.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const pointerX = event.clientX - rect.left;
+    const index = meta.points.reduce((closest, point, pointIndex) => (
+      Math.abs(point.x - pointerX) < Math.abs(meta.points[closest].x - pointerX) ? pointIndex : closest
+    ), 0);
+    const point = meta.points[index];
+    const valueLabel = $("usage-tooltip-value");
+    const dayLabel = $("usage-tooltip-day");
+    if (valueLabel) valueLabel.textContent = `%${formatUsagePercentage(meta.values[index])}`;
+    if (dayLabel) dayLabel.textContent = localizeChartDay(meta.data[index]?.label, index);
+    tooltip.style.left = `${Math.max(54, Math.min(meta.width - 54, point.x))}px`;
+    tooltip.style.top = `${Math.max(54, point.y)}px`;
+    tooltip.classList.remove("hidden");
+  });
+
+  canvas.addEventListener("pointerleave", () => $("usage-chart-tooltip")?.classList.add("hidden"));
 }
 
 // ------------------------------------------------------ bağlantı haritası
@@ -501,8 +774,7 @@ function dashboardToolNodes(offeredIds) {
 }
 
 // İki tam periyotluk sinüs. Genişlik tankın iki katı olduğu için -%50'lik
-// öteleme dikişsiz döngü verir; öğe DÖNDÜRÜLMEZ — döndürülen geniş bir elips
-// kartın dışına taşıp köşegen iz bırakıyordu.
+// öteleme dikişsiz döngü verir; öğe döndürülmez ve kart dışına iz bırakmaz.
 const WAVE_SVG = '<svg viewBox="0 0 240 20" preserveAspectRatio="none" aria-hidden="true">'
   + '<path fill="currentColor" d="M0 10 C15 2 45 2 60 10 C75 18 105 18 120 10'
   + ' C135 2 165 2 180 10 C195 18 225 18 240 10 L240 20 L0 20 Z"/></svg>';
@@ -515,8 +787,6 @@ function tankElements() {
   wave.innerHTML = WAVE_SVG;
   liquid.append(wave);
 
-  // Logo tankın üst kenarına oturur; üst bardaki kopyası kaldırıldı, marka tek
-  // yerde durur.
   const brand = document.createElement("span");
   brand.className = "tank-brand";
   const logo = document.createElement("img");
@@ -527,45 +797,71 @@ function tankElements() {
   brandText.textContent = "Cizi Code";
   brand.append(logo, brandText);
 
-  // Yüzde su seviyesine biner (eskizdeki gibi). Konumu CSS'te clamp'lenir:
-  // %100'de marka adının, %5'te tankın dibinin dışına taşardı.
   const value = document.createElement("span");
   value.className = "tank-value";
   return [liquid, brand, value];
 }
 
 function updateUsageTank({ animateFromEmpty = false, animationDelayMs = 0 } = {}) {
-  const provider = document.querySelector("#connection-map .cbh__card--provider");
-  if (!provider) return;
+  const configGauge = $("config-usage-gauge");
+  const providers = [document.querySelector("#connection-map .cbh__card--provider")].filter(Boolean);
+  if (!providers.length && !configGauge) return;
   const { percent, unlimited, label } = QUOTA_VIEW;
-  provider.classList.remove("usage-warn", "usage-bad");
-  provider.classList.toggle("usage-unlimited", unlimited);
-  if (!unlimited && percent <= 10) provider.classList.add("usage-bad");
-  else if (!unlimited && percent <= 30) provider.classList.add("usage-warn");
   // Etiket ile görsel seviye aynı değeri anlatır: %100 tankı gerçekten tam
   // doldurur. Sınırlar dış kaynaktan beklenmedik bir değer gelmesine karşıdır.
   const quotaLevel = Math.max(0, Math.min(100, percent));
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const shouldAnimateFromEmpty = animateFromEmpty && !HAS_ANIMATED_USAGE_TANK && !reducedMotion;
   if (animateFromEmpty && !HAS_ANIMATED_USAGE_TANK) HAS_ANIMATED_USAGE_TANK = true;
+  const title = unlimited ? "Planınız şu an sınırsız." : `Kullanım hakkınızın %${percent}'i kaldı.`;
 
-  provider.style.setProperty("--quota-level", `${quotaLevel}%`);
-  if (shouldAnimateFromEmpty) {
-    const safeDelayMs = Math.max(0, Number(animationDelayMs) || 0);
-    provider.style.setProperty("--tank-entry-duration", `${USAGE_TANK_ENTRY_MS}ms`);
-    provider.style.setProperty("--tank-entry-delay", `${safeDelayMs}ms`);
-    provider.classList.add("usage-tank-entering");
-    setTimeout(() => {
-      provider.classList.remove("usage-tank-entering");
-      provider.style.removeProperty("--tank-entry-duration");
-      provider.style.removeProperty("--tank-entry-delay");
-    }, safeDelayMs + USAGE_TANK_ENTRY_MS + 100);
+  for (const provider of providers) {
+    provider.classList.remove("usage-warn", "usage-bad");
+    provider.classList.toggle("usage-unlimited", unlimited);
+    if (!unlimited && percent <= 10) provider.classList.add("usage-bad");
+    else if (!unlimited && percent <= 30) provider.classList.add("usage-warn");
+    provider.style.setProperty("--quota-level", `${quotaLevel}%`);
+    provider.title = title;
+    provider.setAttribute("aria-label", title);
+    const value = provider.querySelector(".tank-value");
+    if (value) value.textContent = label;
+
+    if (shouldAnimateFromEmpty) {
+      const safeDelayMs = Math.max(0, Number(animationDelayMs) || 0);
+      provider.style.setProperty("--tank-entry-duration", `${USAGE_TANK_ENTRY_MS}ms`);
+      provider.style.setProperty("--tank-entry-delay", `${safeDelayMs}ms`);
+      provider.classList.add("usage-tank-entering");
+      setTimeout(() => {
+        provider.classList.remove("usage-tank-entering");
+        provider.style.removeProperty("--tank-entry-duration");
+        provider.style.removeProperty("--tank-entry-delay");
+      }, safeDelayMs + USAGE_TANK_ENTRY_MS + 100);
+    }
   }
-  const value = provider.querySelector(".tank-value");
-  if (value) value.textContent = label;
-  provider.title = unlimited
-    ? "Planınız şu an sınırsız."
-    : `Kullanım hakkınızın %${percent}'i kaldı.`;
+
+  if (configGauge) {
+    configGauge.classList.remove("usage-warn", "usage-bad");
+    configGauge.classList.toggle("usage-unlimited", unlimited);
+    if (!unlimited && percent <= 10) configGauge.classList.add("usage-bad");
+    else if (!unlimited && percent <= 30) configGauge.classList.add("usage-warn");
+    configGauge.style.setProperty("--quota-progress", quotaLevel);
+    configGauge.title = title;
+    configGauge.setAttribute("aria-label", title);
+    if (unlimited) {
+      configGauge.removeAttribute("aria-valuenow");
+      configGauge.setAttribute("aria-valuetext", "Sınırsız kullanım");
+    } else {
+      configGauge.setAttribute("aria-valuenow", String(percent));
+      configGauge.setAttribute("aria-valuetext", `%${percent} kaldı`);
+    }
+    const gaugeValue = $("config-gauge-value");
+    const quotaNote = $("config-quota-note");
+    if (gaugeValue) gaugeValue.textContent = label;
+    if (quotaNote) quotaNote.textContent = unlimited
+      ? "Sınırsız kullanım alanı"
+      : percent <= 0 ? "Kullanım hakkı tükendi"
+        : percent <= 30 ? "Kalan hak azalıyor" : "Kullanıma hazır";
+  }
 }
 
 function renderConnectionMap() {
@@ -845,13 +1141,21 @@ let openMenu = null;
 
 function closeMenu() {
   if (!openMenu) return;
-  openMenu.menu.hidden = true;
-  openMenu.toggle.setAttribute("aria-expanded", "false");
+  const { root, menu, toggle } = openMenu;
+  menu.hidden = true;
+  menu.style.removeProperty("left");
+  menu.style.removeProperty("top");
+  menu.style.removeProperty("right");
+  menu.style.removeProperty("bottom");
+  menu.style.removeProperty("max-height");
+  if (root.isConnected) root.appendChild(menu);
+  else menu.remove();
+  toggle.setAttribute("aria-expanded", "false");
   openMenu = null;
 }
 
 document.addEventListener("click", (event) => {
-  if (openMenu && !openMenu.root.contains(event.target)) closeMenu();
+  if (openMenu && !openMenu.root.contains(event.target) && !openMenu.menu.contains(event.target)) closeMenu();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeMenu();
@@ -864,7 +1168,43 @@ document.addEventListener("keydown", (event) => {
 // yaptığını hatırlamak zorunda kalmamalı. Yıkıcı bir eylem yalnızca kullanıcının
 // o an baktığı ekranda durabilir.
 window.addEventListener("blur", closeMenu);
+window.addEventListener("resize", closeMenu);
 document.addEventListener("visibilitychange", () => { if (document.hidden) closeMenu(); });
+
+function positionMenu(menu, toggle, menuAlign) {
+  const viewportGap = 8;
+  const anchorGap = 6;
+  const anchor = toggle.getBoundingClientRect();
+  menu.classList.remove("menu-up");
+  menu.style.maxHeight = "";
+  menu.style.left = `${viewportGap}px`;
+  menu.style.top = `${viewportGap}px`;
+  menu.style.right = "auto";
+  menu.style.bottom = "auto";
+
+  const natural = menu.getBoundingClientRect();
+  const roomBelow = window.innerHeight - anchor.bottom - anchorGap - viewportGap;
+  const roomAbove = anchor.top - anchorGap - viewportGap;
+  const opensAbove = natural.height > roomBelow && roomAbove > roomBelow;
+  const availableHeight = opensAbove ? roomAbove : roomBelow;
+  menu.style.maxHeight = `${Math.min(window.innerHeight - viewportGap * 2, Math.max(120, availableHeight))}px`;
+
+  const bounded = menu.getBoundingClientRect();
+  const preferredLeft = menuAlign === "right" ? anchor.right - bounded.width : anchor.left;
+  const left = Math.min(
+    window.innerWidth - bounded.width - viewportGap,
+    Math.max(viewportGap, preferredLeft),
+  );
+  const preferredTop = opensAbove
+    ? anchor.top - anchorGap - bounded.height
+    : anchor.bottom + anchorGap;
+  const top = Math.min(
+    window.innerHeight - bounded.height - viewportGap,
+    Math.max(viewportGap, preferredTop),
+  );
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
 
 // Bölünmüş düğme: ana eylem + açılır ok. Ana düğme CLI köprüsünün bildiği
 // kimliği taşır, böylece "cizi-cli click <id>" davranışı değişmez.
@@ -892,23 +1232,14 @@ function splitButton({ main, menuAlign = "left", onOpen }) {
     closeMenu();
     if (wasOpen) return;
     menu.innerHTML = '<div class="menu-note">Hazırlanıyor...</div>';
+    document.body.appendChild(menu);
     menu.hidden = false;
-    menu.classList.remove("menu-up");
     toggle.setAttribute("aria-expanded", "true");
     openMenu = { root, menu, toggle };
+    positionMenu(menu, toggle, menuAlign);
     await onOpen(menu);
-    // Alt kenara yakın bir kartta menü pencerenin dışına taşar; o zaman yukarı
-    // doğru açılır. Ölçüm içerik yazıldıktan sonra yapılır, yoksa yükseklik
-    // henüz bilinmez.
-    menu.style.maxHeight = "";
-    const below = menu.getBoundingClientRect();
-    if (below.bottom > window.innerHeight - 8) {
-      menu.classList.add("menu-up");
-      // Yukarı açılan menü de üstten taşabilir; kalan boşluğa sığdırılır ve
-      // gerisi kendi içinde kaydırılır. Aksi halde ilk satır okunamıyor.
-      const above = menu.getBoundingClientRect();
-      if (above.top < 8) menu.style.maxHeight = `${Math.max(140, above.bottom - 12)}px`;
-    }
+    if (openMenu?.menu !== menu || !toggle.isConnected) return;
+    positionMenu(menu, toggle, menuAlign);
   });
 
   root.append(mainButton, toggle, menu);
@@ -974,13 +1305,6 @@ async function buildRemovalMenu(productId, menu, cliPrefix = productId) {
   }
   const selection = selectionFor(productId, plan);
 
-  const heading = document.createElement("div");
-  heading.className = "menu-note";
-  heading.style.borderTop = "none";
-  heading.style.marginTop = "0";
-  heading.textContent = "Nelerin silineceğini seçin. Tıkladığınız kategori saydamlaşır — o silinmez.";
-  menu.appendChild(heading);
-
   const total = document.createElement("span");
   total.className = "cat-size";
 
@@ -1003,9 +1327,7 @@ async function buildRemovalMenu(productId, menu, cliPrefix = productId) {
     name.textContent = category.label;
     const size = document.createElement("span");
     size.className = "cat-size";
-    const hint = document.createElement("span");
-    hint.className = "cat-hint";
-    row.append(name, size, hint);
+    row.append(name, size);
 
     const paint = () => {
       const on = selection.has(category.id) && !category.locked;
@@ -1014,10 +1336,6 @@ async function buildRemovalMenu(productId, menu, cliPrefix = productId) {
       size.textContent = category.locked
         ? "korunur"
         : `${category.bytesApproximate ? "≈ " : ""}${formatBytes(category.bytes)}`;
-      const count = category.paths.length + category.actions.length;
-      hint.textContent = category.locked
-        ? category.lockReason || "Başka bir ürün bu dosyaları kullanıyor."
-        : `${category.hint} · ${count} öğe`;
       row.title = category.locked
         ? category.lockReason || ""
         : category.paths.map((item) => item.path).concat(category.actions.map((item) => item.label)).join("\n");
@@ -1851,7 +2169,7 @@ window.addEventListener("resize", () => {
   clearTimeout(window.__ciziChartTimer);
   window.__ciziChartTimer = setTimeout(() => {
     CONNECTION_MAP?.layout?.();
-    if (CURRENT_SCREEN === "dashboard") drawChart(LAST_USAGE_SERIES);
+    drawChart(LAST_USAGE_SERIES);
   }, 180);
 });
 
