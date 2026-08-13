@@ -65,12 +65,12 @@ function usage() {
         "cizi-cli click claude-desktop.install",
         "cizi-cli click claude-desktop.purge",
         "cizi-cli select period-select 7d",
-        "# Bölünmüş düğmenin açılır listesi: önce oku aç, sonra içindeki eylemi tıkla",
+        "# Kaldırma listesi: oku aç, kategorileri değiştir, ardından kırmızı ana düğmeyi tıkla",
         "cizi-cli click codex-cli.install.more",
         "cizi-cli click codex-cli.download-only",
         "cizi-cli click codex-cli.purge.more",
         "cizi-cli click codex-cli.category.sessions",
-        "cizi-cli click codex-cli.remove-selected",
+        "cizi-cli click codex-cli.purge",
       ],
       guarantee: "Mutating commands resolve and trigger the renderer UI control; they do not call application services directly.",
     },
@@ -107,15 +107,15 @@ function request(state, payload) {
     // Windows package manager, so they get the long timeout.
     const LONG_ACTIONS = [
       "claude-code-cli.install", "claude-code-cli.download-only",
-      "claude-code-cli.purge", "claude-code-cli.remove-selected",
+      "claude-code-cli.purge",
       // Claude Desktop is the longest of them all: a quarter-gigabyte download
       // followed by an elevated package registration.
       "claude-desktop.install", "claude-desktop.download-only",
-      "claude-desktop.purge", "claude-desktop.remove-selected", "claude-desktop.repair",
+      "claude-desktop.purge", "claude-desktop.repair",
       "codex-cli.install", "codex-cli.download-only",
-      "codex-cli.purge", "codex-cli.remove-selected",
+      "codex-cli.purge",
       "codex-desktop.install",
-      "codex-desktop.purge", "codex-desktop.remove-selected",
+      "codex-desktop.purge",
       "tool.reconcile-all",
       "tool.claude-code.switch", "tool.claude-desktop.switch", "tool.codex.switch",
     ];

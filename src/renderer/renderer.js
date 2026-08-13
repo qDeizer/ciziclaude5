@@ -1162,11 +1162,10 @@ document.addEventListener("keydown", (event) => {
 });
 // Pencere odağı kaybettiğinde menü KAPANIR.
 //
-// Bunun bedeli yaşanarak öğrenildi: açık bırakılan bir kaldırma menüsü,
-// "Seçilenleri kaldır" düğmesi ekranda duran silahlı bir yıkıcı eylemdir.
-// Kullanıcı başka bir pencereye geçip saatler sonra döndüğünde o düğmenin ne
-// yaptığını hatırlamak zorunda kalmamalı. Yıkıcı bir eylem yalnızca kullanıcının
-// o an baktığı ekranda durabilir.
+// Bunun bedeli yaşanarak öğrenildi: açık bırakılan bir kaldırma menüsündeki
+// seçimler, kırmızı ana düğmenin ne sileceğini değiştirir. Kullanıcı başka bir
+// pencereye geçip saatler sonra döndüğünde o seçimi hatırlamak zorunda kalmamalı;
+// yıkıcı eylemin bağlamı yalnızca kullanıcının o an baktığı ekranda durabilir.
 window.addEventListener("blur", closeMenu);
 window.addEventListener("resize", closeMenu);
 document.addEventListener("visibilitychange", () => { if (document.hidden) closeMenu(); });
@@ -1278,6 +1277,17 @@ function menuItem({ label, hint, cliId, disabled, onClick }) {
 // baştan saydamdır ve tıklanamaz; sebebi altında yazar.
 const REMOVAL_SELECTION = new Map();
 
+function paintRemovalAction(mainButton, productId, plan, selection) {
+  const selectable = plan.categories.filter((category) => !category.locked);
+  const selectedCount = selectable.filter((category) => selection.has(category.id)).length;
+  const allSelected = selectable.length > 0 && selectedCount === selectable.length;
+  const label = allSelected ? "Kökten Kaldır" : "Seçilenleri Kaldır";
+  mainButton.textContent = label;
+  mainButton.dataset.cliLabel = `${NAMES[productId] || productId} ${label.toLocaleLowerCase("tr-TR")}`;
+  mainButton.disabled = selectedCount === 0;
+  mainButton.title = selectedCount === 0 ? "Kaldırılacak en az bir kategori seçin." : "";
+}
+
 function selectionFor(productId, plan) {
   if (!REMOVAL_SELECTION.has(productId)) {
     REMOVAL_SELECTION.set(productId, new Set(
@@ -1291,7 +1301,7 @@ function selectionFor(productId, plan) {
   return selection;
 }
 
-async function buildRemovalMenu(productId, menu, cliPrefix = productId) {
+async function buildRemovalMenu(productId, menu, mainButton, cliPrefix = productId) {
   const result = await cizi.planProductRemoval(productId);
   menu.innerHTML = "";
   if (!result.ok) {
@@ -1304,6 +1314,7 @@ async function buildRemovalMenu(productId, menu, cliPrefix = productId) {
     return;
   }
   const selection = selectionFor(productId, plan);
+  const paintMain = () => paintRemovalAction(mainButton, productId, plan, selection);
 
   const total = document.createElement("span");
   total.className = "cat-size";
@@ -1350,6 +1361,7 @@ async function buildRemovalMenu(productId, menu, cliPrefix = productId) {
         else selection.add(category.id);
         paint();
         paintTotal();
+        paintMain();
       });
     }
     paint();
@@ -1372,22 +1384,12 @@ async function buildRemovalMenu(productId, menu, cliPrefix = productId) {
     menu.appendChild(note);
   }
 
-  const foot = document.createElement("div");
-  foot.className = "menu-foot";
-  foot.appendChild(button({
-    label: "Seçilenleri kaldır",
-    className: "primary tiny-btn",
-    cliId: `${cliPrefix}.remove-selected`,
-    cliLabel: `${NAMES[productId] || productId} seçilenleri kaldır`,
-    long: true,
-    onClick: () => {
-      closeMenu();
-      runRemoval(productId, [...selection]);
-    },
-  }));
   paintTotal();
-  foot.appendChild(total);
-  menu.appendChild(foot);
+  paintMain();
+  const summary = document.createElement("div");
+  summary.className = "menu-summary";
+  summary.appendChild(total);
+  menu.appendChild(summary);
 }
 
 function removalConfirmText(productName, plan, selectedIds) {
@@ -1443,7 +1445,7 @@ async function runRemoval(productId, categories) {
     toast(`${name} için silinecek bir iz bulunamadı.`, "warn");
     return;
   }
-  const selected = Array.isArray(categories) && categories.length
+  const selected = Array.isArray(categories)
     ? categories
     : plan.categories.filter((category) => category.selectedByDefault).map((category) => category.id);
   if (!selected.length) {
@@ -1685,19 +1687,23 @@ function installActions({ productId, name, install, downloadOnly, site, siteLabe
 // bozardı.
 function removeSplit(productId, cliPrefix = productId) {
   const name = NAMES[productId] || productId;
-  const { root } = splitButton({
+  const split = splitButton({
     main: {
       label: "Kökten Kaldır",
       className: "ghost tiny-btn danger",
       cliId: `${cliPrefix}.purge`,
       cliLabel: `${name} kökten kaldır`,
       long: true,
-      onClick: () => runRemoval(productId, null),
+      onClick: () => {
+        const selection = REMOVAL_SELECTION.get(productId);
+        closeMenu();
+        runRemoval(productId, selection ? [...selection] : null);
+      },
     },
     menuAlign: "right",
-    onOpen: (menu) => buildRemovalMenu(productId, menu, cliPrefix),
+    onOpen: (menu) => buildRemovalMenu(productId, menu, split.mainButton, cliPrefix),
   });
-  return root;
+  return split.root;
 }
 
 // Düzenleyici kimlikleri klasör adlarından gelir (`.vscode` → "vscode"); ekranda

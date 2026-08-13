@@ -914,8 +914,14 @@ button:disabled { opacity: .4; cursor: default; }
 .menu-item strong, .cat-name { font-size: 12px; font-weight: 500; }
 .menu-item span, .menu-note { color: var(--ink-soft); font-size: 11px; }
 .menu-note { padding: 8px 9px; border-top: 1px solid var(--line); line-height: 1.45; overflow-wrap: anywhere; }
-.menu-foot { display: flex; align-items: center; gap: 8px; padding: 6px 4px 2px; border-top: 1px solid var(--line); }
-.menu-foot .cat-size { margin-left: auto; }
+.menu-summary {
+  min-height: 25px;
+  padding: 6px 9px 2px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  border-top: 1px solid var(--line);
+}
 .cat { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
 .cat-size { color: var(--ink-soft); font-size: 11px; }
 .cat.off { opacity: .35; }
